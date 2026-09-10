@@ -101,7 +101,8 @@ export async function tokenFingerprint(token: string) {
 }
 
 export function publicToken(record: MetaTokenRecord): PublicMetaToken {
-  const { encrypted: _encrypted, ...safe } = record;
+  const { encrypted, ...safe } = record;
+  void encrypted;
   return safe;
 }
 
@@ -203,11 +204,13 @@ export function classifyMetaTokenError(error: unknown): {
     /access token.*(invalid|expired)|invalid oauth|session.*expired|token.*expired/.test(lower)
   ) {
     status = 'invalid';
-  } else if ([4, 17, 32, 613].includes(code || -1) || /rate limit|too many calls|request limit/.test(lower)) {
+  } else if (
+    [4, 17, 32, 613].includes(code || -1) ||
+    /rate limit|too many calls|request limit/.test(lower)
+  ) {
     status = 'rate_limited';
   } else if (
-    /business.*(limit|maximum|too many|cannot create|can't create|not eligible)|
-      (limit|maximum).*business|reached.*business|create.*business.*restricted|not eligible.*business/x.test(lower)
+    /business.*(limit|maximum|too many|cannot create|can't create|not eligible)|(limit|maximum).*business|reached.*business|create.*business.*restricted|not eligible.*business/.test(lower)
   ) {
     status = 'create_restricted';
   } else if (
