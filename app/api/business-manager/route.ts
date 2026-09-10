@@ -10,24 +10,10 @@ import {
 } from '../../../lib/meta-tokens';
 
 const verticals = [
-  'ADVERTISING',
-  'AUTOMOTIVE',
-  'CONSUMER_PACKAGED_GOODS',
-  'ECOMMERCE',
-  'EDUCATION',
-  'ENERGY_AND_UTILITIES',
-  'ENTERTAINMENT_AND_MEDIA',
-  'FINANCIAL_SERVICES',
-  'GAMING',
-  'GOVERNMENT_AND_POLITICS',
-  'MARKETING',
-  'ORGANIZATIONS_AND_ASSOCIATIONS',
-  'PROFESSIONAL_SERVICES',
-  'RETAIL',
-  'TECHNOLOGY',
-  'TELECOM',
-  'TRAVEL',
-  'OTHER',
+  'ADVERTISING', 'AUTOMOTIVE', 'CONSUMER_PACKAGED_GOODS', 'ECOMMERCE', 'EDUCATION',
+  'ENERGY_AND_UTILITIES', 'ENTERTAINMENT_AND_MEDIA', 'FINANCIAL_SERVICES', 'GAMING',
+  'GOVERNMENT_AND_POLITICS', 'MARKETING', 'ORGANIZATIONS_AND_ASSOCIATIONS',
+  'PROFESSIONAL_SERVICES', 'RETAIL', 'TECHNOLOGY', 'TELECOM', 'TRAVEL', 'OTHER',
 ] as const;
 
 const createSchema = z.object({
@@ -61,13 +47,15 @@ export async function POST(req: Request) {
   try {
     const workspaceOwner = await owner();
     const input = createSchema.parse(await req.json());
-    const { record, token } = await getMetaTokenSecret(workspaceOwner, input.tokenId);
+    const source = await getMetaTokenSecret(workspaceOwner, input.tokenId);
+    let currentRecord = source.record;
+    const token = source.token;
     const now = new Date().toISOString();
 
     let me: Record<string, unknown>;
     try {
       me = await graphWithToken(token, 'me', { fields: 'id,name' });
-      await updateMetaToken(workspaceOwner, record, {
+      currentRecord = await updateMetaToken(workspaceOwner, currentRecord, {
         status: 'active',
         metaUserId: String(me.id || ''),
         metaUserName: String(me.name || ''),
@@ -79,7 +67,7 @@ export async function POST(req: Request) {
       });
     } catch (error) {
       const classified = classifyMetaTokenError(error);
-      const updated = await updateMetaToken(workspaceOwner, record, {
+      const updated = await updateMetaToken(workspaceOwner, currentRecord, {
         status: classified.status,
         lastCheckedAt: now,
         lastUsedAt: now,
@@ -90,11 +78,7 @@ export async function POST(req: Request) {
         lastErrorSubcode: classified.subcode,
       });
       return Response.json(
-        {
-          error: classified.reason,
-          tokenStatus: classified.status,
-          token: publicToken(updated),
-        },
+        { error: classified.reason, tokenStatus: classified.status, token: publicToken(updated) },
         { status: 400 },
       );
     }
@@ -114,8 +98,8 @@ export async function POST(req: Request) {
       });
     } catch (error) {
       const classified = classifyMetaTokenError(error);
-      const updated = await updateMetaToken(workspaceOwner, record, {
-        status: classified.status === 'unknown_error' ? record.status : classified.status,
+      const updated = await updateMetaToken(workspaceOwner, currentRecord, {
+        status: classified.status === 'unknown_error' ? currentRecord.status : classified.status,
         lastUsedAt: now,
         lastCreateAt: now,
         lastCreateResult: 'failed',
@@ -135,7 +119,7 @@ export async function POST(req: Request) {
 
     const businessId = String(result.id || '');
     if (!/^\d{5,30}$/.test(businessId)) {
-      await updateMetaToken(workspaceOwner, record, {
+      await updateMetaToken(workspaceOwner, currentRecord, {
         lastUsedAt: now,
         lastCreateAt: now,
         lastCreateResult: 'needs_review',
@@ -157,10 +141,10 @@ export async function POST(req: Request) {
       healthNote = `Đã nhận Business ID từ Meta nhưng bước đọc lại thất bại: ${(error as Error).message}`;
     }
 
-    await updateMetaToken(workspaceOwner, record, {
+    currentRecord = await updateMetaToken(workspaceOwner, currentRecord, {
       status: 'active',
       metaUserId,
-      metaUserName: String(me.name || record.metaUserName || ''),
+      metaUserName: String(me.name || currentRecord.metaUserName || ''),
       lastCheckedAt: now,
       lastUsedAt: now,
       lastCreateAt: now,
@@ -187,7 +171,7 @@ export async function POST(req: Request) {
           checked: now,
           healthNote,
         }),
-        audit(workspaceOwner, `Tạo Business Manager thật: ${confirmedName} · token ${record.label}`),
+        audit(workspaceOwner, `Tạo Business Manager thật: ${confirmedName} · token ${currentRecord.label}`),
       ]);
     } catch {
       saved = false;
@@ -199,7 +183,7 @@ export async function POST(req: Request) {
       saved,
       tokenStatus: 'active',
       message: saved
-        ? `Đã tạo Business Manager ${confirmedName} trên Meta bằng token ${record.label}.`
+        ? `Đã tạo Business Manager ${confirmedName} trên Meta bằng token ${currentRecord.label}.`
         : `Business Manager đã được tạo trên Meta (ID ${businessId}) nhưng chưa lưu được vào workspace. Bấm Đồng bộ Meta để nạp lại.`,
     });
   } catch (error) {
