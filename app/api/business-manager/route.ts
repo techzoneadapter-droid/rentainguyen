@@ -1,28 +1,23 @@
 import { z } from 'zod';
-import { audit, config, db, graph, graphPost, owner, put } from '../../../lib/server';
+import { audit, config, db, owner, put } from '../../../lib/server';
+import {
+  classifyMetaTokenError,
+  getMetaTokenSecret,
+  graphPostWithToken,
+  graphWithToken,
+  publicToken,
+  updateMetaToken,
+} from '../../../lib/meta-tokens';
 
 const verticals = [
-  'ADVERTISING',
-  'AUTOMOTIVE',
-  'CONSUMER_PACKAGED_GOODS',
-  'ECOMMERCE',
-  'EDUCATION',
-  'ENERGY_AND_UTILITIES',
-  'ENTERTAINMENT_AND_MEDIA',
-  'FINANCIAL_SERVICES',
-  'GAMING',
-  'GOVERNMENT_AND_POLITICS',
-  'MARKETING',
-  'ORGANIZATIONS_AND_ASSOCIATIONS',
-  'PROFESSIONAL_SERVICES',
-  'RETAIL',
-  'TECHNOLOGY',
-  'TELECOM',
-  'TRAVEL',
-  'OTHER',
+  'ADVERTISING', 'AUTOMOTIVE', 'CONSUMER_PACKAGED_GOODS', 'ECOMMERCE', 'EDUCATION',
+  'ENERGY_AND_UTILITIES', 'ENTERTAINMENT_AND_MEDIA', 'FINANCIAL_SERVICES', 'GAMING',
+  'GOVERNMENT_AND_POLITICS', 'MARKETING', 'ORGANIZATIONS_AND_ASSOCIATIONS',
+  'PROFESSIONAL_SERVICES', 'RETAIL', 'TECHNOLOGY', 'TELECOM', 'TRAVEL', 'OTHER',
 ] as const;
 
 const createSchema = z.object({
+  tokenId: z.string().uuid(),
   name: z.string().trim().min(2).max(100),
   primaryPage: z.string().regex(/^\d{5,30}$/),
   timezone: z.coerce.number().int().min(1).max(1000).default(1),
@@ -38,22 +33,9 @@ function sameOrigin(req: Request) {
 export async function GET() {
   try {
     await owner();
-    const connection = config();
-    if (!connection.token) {
-      return Response.json({ connected: false, version: connection.version });
-    }
-
-    const me = await graph('me', { fields: 'id,name' });
-    return Response.json({
-      connected: true,
-      version: connection.version,
-      user: { id: String(me.id || ''), name: String(me.name || '') },
-    });
+    return Response.json({ version: config().version, tokenSource: 'vault' });
   } catch (error) {
-    return Response.json(
-      { connected: false, error: (error as Error).message },
-      { status: 400 },
-    );
+    return Response.json({ error: (error as Error).message }, { status: 400 });
   }
 }
 
@@ -65,12 +47,42 @@ export async function POST(req: Request) {
   try {
     const workspaceOwner = await owner();
     const input = createSchema.parse(await req.json());
+    const source = await getMetaTokenSecret(workspaceOwner, input.tokenId);
+    let currentRecord = source.record;
+    const token = source.token;
+    const now = new Date().toISOString();
 
-    if (!config().token) {
-      throw new Error('Chưa kết nối Meta. Hãy cấu hình META_ACCESS_TOKEN trên máy chủ trước.');
+    let me: Record<string, unknown>;
+    try {
+      me = await graphWithToken(token, 'me', { fields: 'id,name' });
+      currentRecord = await updateMetaToken(workspaceOwner, currentRecord, {
+        status: 'active',
+        metaUserId: String(me.id || ''),
+        metaUserName: String(me.name || ''),
+        lastCheckedAt: now,
+        lastUsedAt: now,
+        lastError: undefined,
+        lastErrorCode: undefined,
+        lastErrorSubcode: undefined,
+      });
+    } catch (error) {
+      const classified = classifyMetaTokenError(error);
+      const updated = await updateMetaToken(workspaceOwner, currentRecord, {
+        status: classified.status,
+        lastCheckedAt: now,
+        lastUsedAt: now,
+        lastCreateAt: now,
+        lastCreateResult: 'failed_before_create',
+        lastError: classified.reason,
+        lastErrorCode: classified.code,
+        lastErrorSubcode: classified.subcode,
+      });
+      return Response.json(
+        { error: classified.reason, tokenStatus: classified.status, token: publicToken(updated) },
+        { status: 400 },
+      );
     }
 
-    const me = await graph('me', { fields: 'id,name' });
     const metaUserId = String(me.id || '');
     if (!/^\d{5,30}$/.test(metaUserId)) {
       throw new Error('Meta không trả về app-scoped User ID hợp lệ.');
@@ -78,31 +90,49 @@ export async function POST(req: Request) {
 
     let result: Record<string, unknown>;
     try {
-      result = await graphPost(`${metaUserId}/businesses`, {
+      result = await graphPostWithToken(token, `${metaUserId}/businesses`, {
         name: input.name,
         vertical: input.vertical,
         primary_page: input.primaryPage,
         timezone_id: String(input.timezone),
       });
     } catch (error) {
-      const message = (error as Error).message;
-      throw new Error(
-        `${message} Không tự gửi lại yêu cầu tạo. Nếu đây là lỗi timeout/kết nối, hãy kiểm tra Meta Business Settings trước khi thử lại để tránh tạo trùng.`,
+      const classified = classifyMetaTokenError(error);
+      const updated = await updateMetaToken(workspaceOwner, currentRecord, {
+        status: classified.status === 'unknown_error' ? currentRecord.status : classified.status,
+        lastUsedAt: now,
+        lastCreateAt: now,
+        lastCreateResult: 'failed',
+        lastError: classified.reason,
+        lastErrorCode: classified.code,
+        lastErrorSubcode: classified.subcode,
+      });
+      return Response.json(
+        {
+          error: `${classified.reason} Không tự gửi lại yêu cầu. Nếu đây là lỗi timeout/kết nối, hãy kiểm tra Meta Business Settings trước khi thử lại để tránh tạo trùng.`,
+          tokenStatus: updated.status,
+          token: publicToken(updated),
+        },
+        { status: 400 },
       );
     }
 
     const businessId = String(result.id || '');
     if (!/^\d{5,30}$/.test(businessId)) {
-      throw new Error(
-        'Meta đã phản hồi nhưng không trả Business ID. Cần kiểm tra Meta Business Settings trước khi thử lại.',
-      );
+      await updateMetaToken(workspaceOwner, currentRecord, {
+        lastUsedAt: now,
+        lastCreateAt: now,
+        lastCreateResult: 'needs_review',
+        lastError: 'Meta phản hồi nhưng không trả Business ID.',
+      });
+      throw new Error('Meta đã phản hồi nhưng không trả Business ID. Cần kiểm tra Meta Business Settings trước khi thử lại.');
     }
 
     let verified = false;
     let confirmedName = input.name;
     let healthNote = 'Business Manager vừa được tạo qua Meta Graph API.';
     try {
-      const business = await graph(businessId, {
+      const business = await graphWithToken(token, businessId, {
         fields: 'id,name,verification_status,creation_time',
       });
       verified = business.verification_status === 'verified';
@@ -110,6 +140,19 @@ export async function POST(req: Request) {
     } catch (error) {
       healthNote = `Đã nhận Business ID từ Meta nhưng bước đọc lại thất bại: ${(error as Error).message}`;
     }
+
+    currentRecord = await updateMetaToken(workspaceOwner, currentRecord, {
+      status: 'active',
+      metaUserId,
+      metaUserName: String(me.name || currentRecord.metaUserName || ''),
+      lastCheckedAt: now,
+      lastUsedAt: now,
+      lastCreateAt: now,
+      lastCreateResult: `success:${businessId}`,
+      lastError: undefined,
+      lastErrorCode: undefined,
+      lastErrorSubcode: undefined,
+    });
 
     let saved = true;
     try {
@@ -125,10 +168,10 @@ export async function POST(req: Request) {
           limit: 'Chưa rõ',
           parent: '',
           source: 'meta',
-          checked: new Date().toISOString(),
+          checked: now,
           healthNote,
         }),
-        audit(workspaceOwner, `Tạo Business Manager thật: ${confirmedName}`),
+        audit(workspaceOwner, `Tạo Business Manager thật: ${confirmedName} · token ${currentRecord.label}`),
       ]);
     } catch {
       saved = false;
@@ -138,14 +181,15 @@ export async function POST(req: Request) {
       id: businessId,
       name: confirmedName,
       saved,
+      tokenStatus: 'active',
       message: saved
-        ? `Đã tạo Business Manager ${confirmedName} trên Meta.`
+        ? `Đã tạo Business Manager ${confirmedName} trên Meta bằng token ${currentRecord.label}.`
         : `Business Manager đã được tạo trên Meta (ID ${businessId}) nhưng chưa lưu được vào workspace. Bấm Đồng bộ Meta để nạp lại.`,
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
       return Response.json(
-        { error: 'Tên BM, Page ID, timezone hoặc xác nhận mục đích không hợp lệ.' },
+        { error: 'Token nguồn, tên BM, Page ID, timezone hoặc xác nhận mục đích không hợp lệ.' },
         { status: 400 },
       );
     }
