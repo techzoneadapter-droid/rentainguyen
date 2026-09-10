@@ -1,0 +1,3 @@
+import { owner } from '../../../lib/server';
+import { tick,start } from '../../../lib/workflows';
+export async function POST(req:Request){try{const origin=req.headers.get('origin');if(origin&&origin!==new URL(req.url).origin)return Response.json({error:'Nguồn yêu cầu không hợp lệ'},{status:403});const user=await owner();const input=await req.json() as {action?:string;id?:string};if(input.action==='start'&&typeof input.id==='string'){await start(user,input.id);return Response.json({message:'Đã bắt đầu workflow. Giữ ứng dụng mở để xử lý hàng đợi.'});}if(input.action==='tick')return Response.json({changed:await tick(user)});return Response.json({error:'Thao tác không hợp lệ'},{status:400});}catch(e){return Response.json({error:(e as Error).message},{status:400});}}

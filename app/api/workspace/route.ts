@@ -1,0 +1,40 @@
+﻿import { requestSchema } from '../../../lib/validation';
+import { db, owner, list, put, audit, config, graph, graphList } from '../../../lib/server';
+import { demoAssets, types, type Asset } from '../../../lib/data';
+export async function GET(){try{const user=await owner();const [assets,jobs,logs,services]=await Promise.all(['asset','job','log','service'].map(k=>list(user,k)));return Response.json({assets,jobs,logs,services,connected:!!config().token});}catch(e){return Response.json({error:(e as Error).message},{status:503});}}
+export async function POST(req:Request){try{
+ const origin=req.headers.get('origin');if(origin&&origin!==new URL(req.url).origin)return Response.json({error:'Nguá»“n yÃªu cáº§u khÃ´ng há»£p lá»‡.'},{status:403});
+ const user=await owner();const body=requestSchema.parse(await req.json());const {action}=body;let message='ÄÃ£ lÆ°u';
+ if(action==='seed'){await db().batch([...demoAssets.map(a=>put(user,'asset',{...a,id:`${user}:${a.id}`,parent:a.parent?`${user}:${a.parent}`:''})),audit(user,'Náº¡p 24 tÃ i nguyÃªn máº«u â€¢ khÃ´ng káº¿t ná»‘i Meta')]);message='ÄÃ£ náº¡p bá»™ dá»¯ liá»‡u máº«u';}
+ else if(action==='asset'){
+ const a=body.asset as Asset;if(!a||!types.includes(a.type)||!a.name?.trim()||a.name.length>150)throw new Error('TÃªn hoáº·c loáº¡i tÃ i nguyÃªn khÃ´ng há»£p lá»‡.');
+ if(a.id){const existing=(await list(user,'asset')).find(x=>x.id===a.id);if(!existing)throw new Error('KhÃ´ng tÃ¬m tháº¥y tÃ i nguyÃªn.');await db().batch([put(user,'asset',{...existing,name:a.name,country:a.country,tier:a.tier,limit:existing.source==='meta'?existing.limit:a.limit}),audit(user,`Cáº­p nháº­t nhÃ£n: ${a.name}`)]);}
+ else{await db().batch([put(user,'asset',{...a,id:crypto.randomUUID(),source:'manual',status:'ChÆ°a kiá»ƒm tra',verified:false}),audit(user,`ThÃªm há»“ sÆ¡ thá»§ cÃ´ng: ${a.name}`)]);}message='ÄÃ£ lÆ°u há»“ sÆ¡ tÃ i nguyÃªn';}
+ else if(action==='delete') {const ids=body.ids;if(!Array.isArray(ids)||!ids.length||ids.length>100)throw new Error('Chá»n tá»« 1 Ä‘áº¿n 100 há»“ sÆ¡.');await db().batch([...ids.map(id=>db().prepare('DELETE FROM records WHERE owner = ? AND kind = ? AND id = ?').bind(user,'asset',id)),audit(user,`XÃ³a ${ids.length} há»“ sÆ¡ khá»i á»©ng dá»¥ng (khÃ´ng xÃ³a trÃªn Meta)`)]);message='ÄÃ£ xÃ³a há»“ sÆ¡ khá»i á»©ng dá»¥ng';}
+ else if(action==='job'){
+ const j=body.job;if(!j||!['create','share','member','connect','remove-member','remove-partner','detach'].includes(j.operation))throw new Error('Workflow khÃ´ng há»£p lá»‡.');
+ const count=Number(j.count), interval=Number(j.interval);if(!Number.isInteger(count)||count<1||count>100||!Number.isInteger(interval)||interval<5||interval>3600)throw new Error('Sá»‘ lÆ°á»£ng 1â€“100; khoáº£ng nghá»‰ 5â€“3600 giÃ¢y.');
+ const assets=await list(user,'asset');const ids=Array.isArray(j.assetIds)?j.assetIds:[];if(ids.some((id:string)=>!assets.some(a=>a.id===id)))throw new Error('TÃ i nguyÃªn khÃ´ng thuá»™c workspace.');
+ if(j.operation==='share'){if(!/^\d{5,30}$/.test(j.partner||''))throw new Error('ID Ä‘á»‘i tÃ¡c pháº£i gá»“m 5â€“30 chá»¯ sá»‘.');if(!ids.length||ids.some((id:string)=>!assets.some(a=>a.id===id&&a.type==='TKQC')))throw new Error('Chá»n tÃ i khoáº£n quáº£ng cÃ¡o Ä‘á»ƒ chia sáº».');}
+ if(j.email&&!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(j.email))throw new Error('Email quáº£n trá»‹ viÃªn khÃ´ng há»£p lá»‡.');
+ if(j.operation==='member'&&!j.email)throw new Error('Nháº­p email thÃ nh viÃªn.');
+ if(j.operation==='create'&&(!types.includes(j.type)||!j.name?.trim()))throw new Error('Nháº­p tÃªn vÃ  loáº¡i tÃ i nguyÃªn.');
+ const value={...j,id:crypto.randomUUID(),count,interval,assetIds:ids,name:j.name||'Workflow tÃ i nguyÃªn',status:'Chá» cáº¥u hÃ¬nh Meta',created:new Date().toISOString(),completed:0,reason:'ÄÃ£ lÆ°u cáº¥u hÃ¬nh. ChÆ°a thá»±c thi: cáº§n káº¿t ná»‘i Meta vÃ  xÃ¡c nháº­n endpoint, quyá»n cá»§a app cho thao tÃ¡c nÃ y.'};
+ await db().batch([put(user,'job',value),audit(user,`LÆ°u workflow: ${value.name}`,'ÄÃ£ lÆ°u cáº¥u hÃ¬nh')]);message='ÄÃ£ lÆ°u workflow; chÆ°a thá»±c hiá»‡n thay Ä‘á»•i trÃªn Meta';}
+ else if(action==='cancel'){const job=(await list(user,'job')).find(j=>j.id===body.id);if(!job)throw new Error('KhÃ´ng tÃ¬m tháº¥y workflow.');await db().batch([put(user,'job',{...job,status:'ÄÃ£ há»§y'}),audit(user,`Há»§y workflow: ${job.name}`)]);message='ÄÃ£ há»§y workflow';}
+ else if(action==='service'){const s=body.service;if(!s?.name?.trim()||!s?.provider?.trim()||s.name.length>150||s.provider.length>150)throw new Error('Nháº­p tÃªn dá»‹ch vá»¥ vÃ  nhÃ  cung cáº¥p.');if(s.url){const url=new URL(s.url);if(!['http:','https:'].includes(url.protocol))throw new Error('ÄÆ°á»ng dáº«n pháº£i lÃ  HTTP/HTTPS.');}await db().batch([put(user,'service',{...s,id:crypto.randomUUID(),created:new Date().toISOString(),status:'ChÆ°a tháº©m Ä‘á»‹nh'}),audit(user,`ThÃªm dá»‹ch vá»¥: ${s.name}`)]);message='ÄÃ£ thÃªm dá»‹ch vá»¥';}
+ else if(action==='sync'){
+ const businesses=await graphList('me/businesses','id,name,verification_status');const assets:Asset[]=[];
+ for(const b of businesses){const id=String(b.id);assets.push({id:`meta:${id}`,name:String(b.name),type:'BM',verified:b.verification_status==='verified',status:'Truy cáº­p Ä‘Æ°á»£c',country:'ChÆ°a rÃµ',tier:'ChÆ°a rÃµ',limit:'ChÆ°a rÃµ',parent:'',source:'meta',checked:new Date().toISOString()});
+ const accounts=await graphList(`${id}/owned_ad_accounts`,'id,name,account_status,spend_cap,currency');for(const a of accounts)assets.push({id:`meta:${a.id}`,name:String(a.name),type:'TKQC',status:a.account_status===1?'LIVE':a.account_status===2?'DIE':'Háº¡n cháº¿',verified:false,country:'ChÆ°a rÃµ',tier:'â€”',limit:a.spend_cap&&a.spend_cap!=='0'?`${a.spend_cap} ${a.currency} (Ä‘Æ¡n vá»‹ API)`:'ChÆ°a thiáº¿t láº­p',currency:String(a.currency),metaStatus:Number(a.account_status),parent:`meta:${id}`,source:'meta',checked:new Date().toISOString()});
+ for(const [edge,type] of [['owned_pages','Page'],['adspixels','Dataset/Pixel']]){const data=await graphList(`${id}/${edge}`,'id,name');for(const a of data)assets.push({id:`meta:${a.id}`,name:String(a.name),type,status:'Truy cáº­p Ä‘Æ°á»£c',verified:false,country:'ChÆ°a rÃµ',tier:'â€”',limit:'â€”',parent:`meta:${id}`,source:'meta',checked:new Date().toISOString()});}}
+ const previous=await list(user,'asset');await db().batch([...assets.map(a=>put(user,'asset',{...a,id:`${user}:${a.id}`,parent:a.parent?`${user}:${a.parent}`:''})),...previous.filter(a=>a.source==='meta'&&!assets.some(n=>`${user}:${n.id}`===a.id)).map(a=>put(user,'asset',{...a,status:'Cáº§n kiá»ƒm tra quyá»n',checked:new Date().toISOString()})),audit(user,`Äá»“ng bá»™ ${assets.length} tÃ i nguyÃªn tá»« Meta`)]);message=`ÄÃ£ Ä‘á»“ng bá»™ ${assets.length} tÃ i nguyÃªn`;
+ }
+ else if(action==='health'){
+ const assets=await list(user,'asset');const chosen=assets.filter(a=>!body.ids?.length||body.ids.includes(a.id));if(!chosen.length)throw new Error('ChÆ°a cÃ³ tÃ i nguyÃªn Ä‘á»ƒ kiá»ƒm tra.');
+ const results=[];for(const a of chosen){if(a.source!=='meta'){results.push({...a,checked:new Date().toISOString(),healthNote:a.source==='demo'?'Dá»¯ liá»‡u máº«u, khÃ´ng kiá»ƒm tra Meta':'Cáº§n liÃªn káº¿t ID Meta trÆ°á»›c khi kiá»ƒm tra'});continue;}try{const id=a.id.split('meta:')[1];const r=await graph(id,{fields:a.type==='TKQC'?'id,account_status':'id'});results.push({...a,checked:new Date().toISOString(),status:a.type==='TKQC'?(r.account_status===1?'LIVE':r.account_status===2?'DIE':'Háº¡n cháº¿'):'Truy cáº­p Ä‘Æ°á»£c',healthNote:'ÄÃ£ Ä‘á»c tá»« Meta'});}catch(e){results.push({...a,checked:new Date().toISOString(),status:'KhÃ´ng xÃ¡c Ä‘á»‹nh',healthNote:(e as Error).message});}}
+ await db().batch([...results.map(a=>put(user,'asset',a)),audit(user,`Kiá»ƒm tra ${results.length} há»“ sÆ¡; ${chosen.filter(a=>a.source==='meta').length} tÃ i nguyÃªn Meta`)]);message='ÄÃ£ cáº­p nháº­t káº¿t quáº£ kiá»ƒm tra';
+ }else throw new Error('Thao tÃ¡c khÃ´ng Ä‘Æ°á»£c há»— trá»£.');
+ return Response.json({message});
+ }catch(e){return Response.json({error:(e as Error).message},{status:400});}}
+
