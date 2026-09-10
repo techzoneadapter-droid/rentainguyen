@@ -8,6 +8,7 @@ import {
   LoaderCircle,
   Mail,
   RefreshCw,
+  Shuffle,
   ShieldAlert,
   X,
 } from 'lucide-react';
@@ -32,12 +33,7 @@ type TokenItem = {
 
 type PageItem = { id: string; name: string; tasks?: string[] };
 type TokenResponse = { tokens?: TokenItem[]; error?: string };
-type PagesResponse = {
-  pages?: PageItem[];
-  error?: string;
-  hint?: string;
-  tokenStatus?: TokenStatus;
-};
+type PagesResponse = { pages?: PageItem[]; error?: string; hint?: string; tokenStatus?: TokenStatus };
 
 type CreateResult = {
   id?: string;
@@ -65,7 +61,6 @@ type CreateResult = {
   };
 };
 
-const createButtonText = ['Tạo tài nguyên', 'Táº¡o tÃ i nguyÃªn'];
 const tokenLabels: Record<TokenStatus, string> = {
   active: 'Hoạt động',
   invalid: 'Hết hạn / không hợp lệ',
@@ -101,6 +96,11 @@ function verificationLabel(value?: string) {
   return value;
 }
 
+function pickRandomPage(pages: PageItem[]) {
+  if (!pages.length) return undefined;
+  return pages[Math.floor(Math.random() * pages.length)];
+}
+
 export default function BusinessManagerCreator() {
   const [open, setOpen] = useState(false);
   const [showFallback, setShowFallback] = useState(false);
@@ -108,7 +108,7 @@ export default function BusinessManagerCreator() {
   const [tokenId, setTokenId] = useState('');
   const [pages, setPages] = useState<PageItem[]>([]);
   const [primaryPage, setPrimaryPage] = useState('');
-  const [manualPage, setManualPage] = useState(false);
+  const [pageMode, setPageMode] = useState<'random' | 'manual'>('random');
   const [loadingTokens, setLoadingTokens] = useState(false);
   const [loadingPages, setLoadingPages] = useState(false);
   const [pagesError, setPagesError] = useState('');
@@ -116,11 +116,9 @@ export default function BusinessManagerCreator() {
   const [error, setError] = useState('');
   const [result, setResult] = useState<CreateResult | null>(null);
   const [confirmed, setConfirmed] = useState(false);
+  const [pageUsed, setPageUsed] = useState<PageItem | null>(null);
 
-  const selectedToken = useMemo(
-    () => tokens.find((token) => token.id === tokenId),
-    [tokens, tokenId],
-  );
+  const selectedToken = useMemo(() => tokens.find((token) => token.id === tokenId), [tokens, tokenId]);
 
   const loadTokens = useCallback(async () => {
     setLoadingTokens(true);
@@ -146,30 +144,33 @@ export default function BusinessManagerCreator() {
     if (!id) return;
     setLoadingPages(true);
     setPagesError('');
+    setPageUsed(null);
     try {
-      const response = await fetch(`/api/business-manager?tokenId=${encodeURIComponent(id)}`, {
-        cache: 'no-store',
-      });
+      const response = await fetch(`/api/business-manager?tokenId=${encodeURIComponent(id)}`, { cache: 'no-store' });
       const data = (await response.json()) as PagesResponse;
       if (!response.ok) {
         setPages([]);
         setPrimaryPage('');
-        setManualPage(true);
+        setPageMode('manual');
         setPagesError(`${data.error || 'Không đọc được danh sách Page.'}${data.hint ? ` ${data.hint}` : ''}`);
         await loadTokens();
         return;
       }
+
       const nextPages = data.pages || [];
       setPages(nextPages);
-      setPrimaryPage(nextPages[0]?.id || '');
-      setManualPage(nextPages.length === 0);
-      if (nextPages.length === 0) {
-        setPagesError('Token không trả về Page nào. Meta vẫn yêu cầu một Page đại diện khi tạo Business Manager; bạn có thể nhập Page ID thủ công nếu tài khoản có quyền quản lý Page đó.');
+      if (nextPages.length > 0) {
+        setPageMode('random');
+        setPrimaryPage('');
+      } else {
+        setPageMode('manual');
+        setPrimaryPage('');
+        setPagesError('Token không trả về Page nào. Hãy kiểm tra quyền pages_show_list hoặc nhập Page ID thủ công nếu tài khoản thực sự quản lý Page đó.');
       }
     } catch (err) {
       setPages([]);
       setPrimaryPage('');
-      setManualPage(true);
+      setPageMode('manual');
       setPagesError((err as Error).message);
     } finally {
       setLoadingPages(false);
@@ -184,7 +185,8 @@ export default function BusinessManagerCreator() {
     setConfirmed(false);
     setPages([]);
     setPrimaryPage('');
-    setManualPage(false);
+    setPageMode('random');
+    setPageUsed(null);
     void loadTokens();
   }, [loadTokens]);
 
@@ -201,7 +203,7 @@ export default function BusinessManagerCreator() {
       const button = target.closest('button');
       if (!button) return;
       const text = button.textContent?.trim() || '';
-      if (!createButtonText.some((label) => text.includes(label))) return;
+      if (!text.includes('Tạo tài nguyên') && !text.includes('Táº¡o tÃ i nguyÃªn')) return;
       event.preventDefault();
       event.stopPropagation();
       openCreator();
@@ -222,21 +224,17 @@ export default function BusinessManagerCreator() {
 
   function openTokenManager() {
     setOpen(false);
-    window.setTimeout(() => {
-      document.querySelector<HTMLButtonElement>('[data-token-manager-nav]')?.click();
-    }, 0);
+    window.setTimeout(() => document.querySelector<HTMLButtonElement>('[data-token-manager-nav]')?.click(), 0);
   }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError('');
     setResult(null);
+    setPageUsed(null);
+
     if (!tokenId) {
       setError('Chọn một token nguồn trước khi tạo BM.');
-      return;
-    }
-    if (!primaryPage) {
-      setError('Meta yêu cầu một Facebook Page đại diện. Hãy chọn Page hoặc nhập Page ID hợp lệ.');
       return;
     }
     if (!confirmed) {
@@ -244,8 +242,24 @@ export default function BusinessManagerCreator() {
       return;
     }
 
+    let chosenPage: PageItem | undefined;
+    if (pageMode === 'random') {
+      chosenPage = pickRandomPage(pages);
+      if (!chosenPage) {
+        setError('Token hiện không có Page khả dụng để chọn ngẫu nhiên.');
+        return;
+      }
+    } else {
+      if (!/^\d{5,30}$/.test(primaryPage)) {
+        setError('Nhập một Facebook Page ID hợp lệ.');
+        return;
+      }
+      chosenPage = pages.find((page) => page.id === primaryPage) || { id: primaryPage, name: 'Page nhập thủ công' };
+    }
+
     const form = new FormData(event.currentTarget);
     setSubmitting(true);
+    setPageUsed(chosenPage);
     try {
       const response = await fetch('/api/business-manager', {
         method: 'POST',
@@ -253,7 +267,7 @@ export default function BusinessManagerCreator() {
         body: JSON.stringify({
           tokenId,
           name: String(form.get('name') || ''),
-          primaryPage,
+          primaryPage: chosenPage.id,
           adminEmail: String(form.get('adminEmail') || ''),
           timezone: Number(form.get('timezone') || 140),
           vertical: String(form.get('vertical') || 'ADVERTISING'),
@@ -276,7 +290,7 @@ export default function BusinessManagerCreator() {
   }
 
   const selectedLabel = selectedToken ? tokenLabels[selectedToken.status] : '';
-  const blocked = !tokenId || !primaryPage || selectedToken?.status === 'invalid';
+  const blocked = !tokenId || selectedToken?.status === 'invalid' || (pageMode === 'random' ? pages.length === 0 : !primaryPage);
   const inviteFailed = result?.invite?.status === 'failed';
 
   return (
@@ -293,7 +307,7 @@ export default function BusinessManagerCreator() {
             <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, padding: '20px 22px 14px', borderBottom: '1px solid #eceef3' }}>
               <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
                 <span style={{ display: 'grid', placeItems: 'center', width: 42, height: 42, borderRadius: 12, background: '#f0ebff', color: '#6d4bd8' }}><Building2 size={21} /></span>
-                <div><strong style={{ display: 'block', fontSize: 18 }}>Tạo Business Manager thật</strong><small style={{ color: '#747880' }}>Tạo 1 BM/lần · chọn token nguồn · có thể gửi lời mời ADMIN sau khi tạo</small></div>
+                <div><strong style={{ display: 'block', fontSize: 18 }}>Tạo Business Manager thật</strong><small style={{ color: '#747880' }}>1 BM mỗi lần · chọn ngẫu nhiên Page từ token · không tự đổi token</small></div>
               </div>
               <button type="button" disabled={submitting} onClick={() => setOpen(false)} aria-label="Đóng" style={{ border: 0, background: 'transparent', padding: 6 }}><X size={20} /></button>
             </div>
@@ -313,7 +327,7 @@ export default function BusinessManagerCreator() {
                       ['Business ID', result.business?.id || result.id || ''],
                       ['Trạng thái', result.business?.status || 'Truy cập được'],
                       ['Xác minh', verificationLabel(result.business?.verificationStatus)],
-                      ['Page đại diện', result.business?.primaryPage?.name ? `${result.business.primaryPage.name} · ${result.business.primaryPage.id}` : result.business?.primaryPage?.id || primaryPage],
+                      ['Page đã dùng', result.business?.primaryPage?.name ? `${result.business.primaryPage.name} · ${result.business.primaryPage.id}` : `${pageUsed?.name || ''} · ${result.business?.primaryPage?.id || pageUsed?.id || ''}`],
                       ['Người tạo', result.business?.createdBy?.name ? `${result.business.createdBy.name} · ${result.business.createdBy.id}` : result.business?.createdBy?.id || selectedToken?.metaUserName || ''],
                       ['Múi giờ Meta', result.business?.timezoneId || 'Chưa rõ'],
                       ['Thời gian tạo', formatTime(result.business?.creationTime)],
@@ -334,7 +348,7 @@ export default function BusinessManagerCreator() {
                   )}
 
                   <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 9 }}>
-                    <button type="button" onClick={() => { setResult(null); setConfirmed(false); }} style={{ border: '1px solid #d9dce3', borderRadius: 10, background: 'white', padding: '10px 13px' }}>Tạo BM khác</button>
+                    <button type="button" onClick={() => { setResult(null); setConfirmed(false); setPageUsed(null); }} style={{ border: '1px solid #d9dce3', borderRadius: 10, background: 'white', padding: '10px 13px' }}>Tạo BM khác</button>
                     <button type="button" onClick={() => window.location.reload()} style={{ border: 0, borderRadius: 10, background: '#7353e8', color: 'white', padding: '10px 14px', fontWeight: 700 }}>Tải lại workspace</button>
                   </div>
                 </div>
@@ -345,26 +359,61 @@ export default function BusinessManagerCreator() {
                       <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontWeight: 700, fontSize: 13 }}><KeyRound size={16} /> Token nguồn</span>
                       <button type="button" onClick={openTokenManager} style={{ border: 0, background: 'transparent', color: '#6d4bd8', fontSize: 12, padding: 0 }}>Quản lý token →</button>
                     </div>
-                    {loadingTokens ? <div style={{ display: 'flex', gap: 7, alignItems: 'center', color: '#747880', fontSize: 13 }}><LoaderCircle size={15} className="spin" /> Đang tải token…</div> : tokens.length ? <><select value={tokenId} onChange={(event) => setTokenId(event.target.value)} style={inputStyle}>{tokens.map((token) => <option key={token.id} value={token.id}>{token.label} · {token.metaUserName || token.metaUserId || 'chưa nhận diện'} · {tokenLabels[token.status]}</option>)}</select>{selectedToken && <div style={{ marginTop: 8, fontSize: 12, color: selectedToken.status === 'active' ? '#21643a' : '#8a5d00', lineHeight: 1.45 }}><strong>{selectedLabel}</strong> · FP {selectedToken.fingerprint}{selectedToken.lastError ? <div style={{ marginTop: 3, color: '#9c3531' }}>{selectedToken.lastError}</div> : null}</div>}</> : <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', color: '#8a5d00', fontSize: 12, lineHeight: 1.45 }}><ShieldAlert size={16} /><span>Chưa có token nguồn. Đóng hộp thoại và mở mục <strong>Quản lý token</strong> ở menu bên trái để thêm token.</span></div>}
+                    {loadingTokens ? (
+                      <div style={{ display: 'flex', gap: 7, alignItems: 'center', color: '#747880', fontSize: 13 }}><LoaderCircle size={15} className="spin" /> Đang tải token…</div>
+                    ) : tokens.length ? (
+                      <>
+                        <select value={tokenId} onChange={(event) => setTokenId(event.target.value)} style={inputStyle}>
+                          {tokens.map((token) => <option key={token.id} value={token.id}>{token.label} · {token.metaUserName || token.metaUserId || 'chưa nhận diện'} · {tokenLabels[token.status]}</option>)}
+                        </select>
+                        {selectedToken && <div style={{ marginTop: 8, fontSize: 12, color: selectedToken.status === 'active' ? '#21643a' : '#8a5d00', lineHeight: 1.45 }}><strong>{selectedLabel}</strong> · FP {selectedToken.fingerprint}{selectedToken.lastError ? <div style={{ marginTop: 3, color: '#9c3531' }}>{selectedToken.lastError}</div> : null}</div>}
+                      </>
+                    ) : (
+                      <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', color: '#8a5d00', fontSize: 12, lineHeight: 1.45 }}><ShieldAlert size={16} /><span>Chưa có token nguồn. Đóng hộp thoại và mở mục <strong>Quản lý token</strong> ở menu bên trái.</span></div>
+                    )}
                   </div>
 
-                  <label style={{ display: 'block', marginBottom: 13 }}><span style={{ display: 'block', fontSize: 13, fontWeight: 700, marginBottom: 6 }}>Tên Business Manager</span><input name="name" required minLength={2} maxLength={100} placeholder="VD: Nguyen Media" style={inputStyle} /></label>
+                  <label style={{ display: 'block', marginBottom: 13 }}>
+                    <span style={{ display: 'block', fontSize: 13, fontWeight: 700, marginBottom: 6 }}>Tên Business Manager</span>
+                    <input name="name" required minLength={2} maxLength={100} placeholder="VD: Nguyen Media" style={inputStyle} />
+                  </label>
 
                   <div style={{ display: 'block', marginBottom: 13 }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 6 }}>
                       <span style={{ fontSize: 13, fontWeight: 700 }}>Page đại diện</span>
                       <button type="button" disabled={!tokenId || loadingPages} onClick={() => tokenId && void loadPages(tokenId)} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, border: 0, background: 'transparent', color: '#6d4bd8', fontSize: 11, padding: 0 }}><RefreshCw size={13} className={loadingPages ? 'spin' : ''} /> Đọc lại Page</button>
                     </div>
-                    {loadingPages ? <div style={{ ...inputStyle, color: '#747880', display: 'flex', alignItems: 'center', gap: 7 }}><LoaderCircle size={15} className="spin" /> Đang đọc các Page tài khoản quản lý…</div> : !manualPage && pages.length ? <select value={primaryPage} onChange={(event) => setPrimaryPage(event.target.value)} style={inputStyle}>{pages.map((page) => <option key={page.id} value={page.id}>{page.name} · {page.id}</option>)}</select> : <input value={primaryPage} onChange={(event) => setPrimaryPage(event.target.value.replace(/\D/g, ''))} inputMode="numeric" pattern="[0-9]{5,30}" placeholder="Nhập Facebook Page ID" style={inputStyle} />}
-                    <small style={{ display: 'block', marginTop: 5, color: '#747880', lineHeight: 1.45 }}>Meta bắt buộc có một Page đại diện khi tạo Business Manager qua API. App ưu tiên tự đọc Page từ token để bạn không phải nhập ID.</small>
+
+                    {loadingPages ? (
+                      <div style={{ ...inputStyle, color: '#747880', display: 'flex', alignItems: 'center', gap: 7 }}><LoaderCircle size={15} className="spin" /> Đang đọc các Page tài khoản quản lý…</div>
+                    ) : pages.length > 0 ? (
+                      <>
+                        <div style={{ border: '1px solid #d9dce3', borderRadius: 11, padding: 12, background: '#f8fbff' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#21643a', fontWeight: 700, fontSize: 13 }}><CheckCircle2 size={17} /> Có {pages.length} Page khả dụng từ token</div>
+                          <div style={{ marginTop: 5, color: '#646871', fontSize: 12, lineHeight: 1.45 }}>Mặc định khi bấm tạo, app sẽ chọn ngẫu nhiên 1 Page trong danh sách này làm Page đại diện cho BM.</div>
+                        </div>
+                        <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                          <button type="button" onClick={() => { setPageMode('random'); setPrimaryPage(''); }} style={{ flex: 1, border: pageMode === 'random' ? '1px solid #7353e8' : '1px solid #d9dce3', borderRadius: 9, background: pageMode === 'random' ? '#f2eeff' : 'white', color: pageMode === 'random' ? '#6546d4' : '#646871', padding: '9px 10px', fontWeight: 700, fontSize: 12, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}><Shuffle size={14} /> Chọn ngẫu nhiên</button>
+                          <button type="button" onClick={() => { setPageMode('manual'); setPrimaryPage(pages[0]?.id || ''); }} style={{ flex: 1, border: pageMode === 'manual' ? '1px solid #7353e8' : '1px solid #d9dce3', borderRadius: 9, background: pageMode === 'manual' ? '#f2eeff' : 'white', color: pageMode === 'manual' ? '#6546d4' : '#646871', padding: '9px 10px', fontWeight: 700, fontSize: 12 }}>Chọn thủ công</button>
+                        </div>
+                        {pageMode === 'manual' && (
+                          <select value={primaryPage} onChange={(event) => setPrimaryPage(event.target.value)} style={{ ...inputStyle, marginTop: 8 }}>
+                            {pages.map((page) => <option key={page.id} value={page.id}>{page.name} · {page.id}</option>)}
+                          </select>
+                        )}
+                      </>
+                    ) : (
+                      <input value={primaryPage} onChange={(event) => setPrimaryPage(event.target.value.replace(/\D/g, ''))} inputMode="numeric" pattern="[0-9]{5,30}" placeholder="Nhập Facebook Page ID" style={inputStyle} />
+                    )}
+
+                    <small style={{ display: 'block', marginTop: 5, color: '#747880', lineHeight: 1.45 }}>“Khả dụng” nghĩa là Page được Meta trả về qua token này; Meta vẫn là bên quyết định cuối cùng Page có được chấp nhận làm primary_page hay không.</small>
                     {pagesError && <div style={{ marginTop: 5, fontSize: 11, color: '#9a6a17', lineHeight: 1.45 }}>{pagesError}</div>}
-                    {!manualPage && pages.length > 0 && <button type="button" onClick={() => { setManualPage(true); setPrimaryPage(''); }} style={{ border: 0, background: 'transparent', color: '#777b83', padding: '5px 0 0', fontSize: 11 }}>Nhập Page ID thủ công</button>}
                   </div>
 
                   <label style={{ display: 'block', marginBottom: 13 }}>
                     <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, fontWeight: 700, marginBottom: 6 }}><Mail size={15} /> Email quản trị sau khi tạo</span>
                     <input name="adminEmail" type="email" maxLength={254} placeholder="VD: admin@congty.com (có thể để trống)" style={inputStyle} />
-                    <small style={{ display: 'block', marginTop: 5, color: '#747880', lineHeight: 1.45 }}>Nếu điền email, sau khi BM tạo thành công app sẽ gửi lời mời vai trò ADMIN qua Meta. Người nhận phải chấp nhận lời mời.</small>
+                    <small style={{ display: 'block', marginTop: 5, color: '#747880', lineHeight: 1.45 }}>Nếu điền email, sau khi BM tạo thành công app sẽ gửi lời mời vai trò ADMIN qua Meta.</small>
                   </label>
 
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 13 }}>
@@ -374,10 +423,13 @@ export default function BusinessManagerCreator() {
 
                   <label style={{ display: 'flex', gap: 9, alignItems: 'flex-start', border: '1px solid #e3e5ea', borderRadius: 12, padding: 11, fontSize: 12, lineHeight: 1.45, marginBottom: 13 }}><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} style={{ marginTop: 2 }} /><span>Tôi xác nhận BM này dùng cho doanh nghiệp của tôi hoặc khách hàng đã ủy quyền. Ứng dụng không tự đổi token hoặc tự retry để vượt giới hạn của Meta.</span></label>
 
+                  {pageUsed && submitting && <div style={{ borderRadius: 10, padding: 10, background: '#f3efff', color: '#6546d4', fontSize: 12, lineHeight: 1.5, marginBottom: 13 }}><Shuffle size={14} style={{ display: 'inline', marginRight: 5 }} />Đã chọn ngẫu nhiên Page: <strong>{pageUsed.name}</strong> · {pageUsed.id}</div>}
                   {error && <div role="alert" style={{ borderRadius: 10, padding: 10, background: '#fff1f0', color: '#9c302d', fontSize: 12, lineHeight: 1.5, marginBottom: 13 }}>{error}</div>}
 
-                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 9 }}><button type="button" disabled={submitting} onClick={() => setOpen(false)} style={{ border: '1px solid #d9dce3', borderRadius: 10, background: 'white', padding: '10px 13px' }}>Hủy</button><button type="submit" disabled={blocked || submitting || !confirmed} style={{ display: 'inline-flex', alignItems: 'center', gap: 7, border: 0, borderRadius: 10, background: '#7353e8', color: 'white', padding: '10px 14px', cursor: blocked || submitting || !confirmed ? 'not-allowed' : 'pointer', opacity: blocked || submitting || !confirmed ? .55 : 1, fontWeight: 700 }}>{submitting ? <LoaderCircle size={16} className="spin" /> : <Building2 size={16} />}{submitting ? 'Đang tạo và đọc trạng thái…' : 'Tạo BM trên Meta'}</button></div>
-                  <p style={{ color: '#777b83', fontSize: 11, lineHeight: 1.5, margin: '14px 0 0' }}>Nếu BM tạo thành công nhưng bước mời admin lỗi, app vẫn lưu BM và hiển thị riêng lỗi lời mời; không gửi lại request tạo BM.</p>
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 9 }}>
+                    <button type="button" disabled={submitting} onClick={() => setOpen(false)} style={{ border: '1px solid #d9dce3', borderRadius: 10, background: 'white', padding: '10px 13px' }}>Hủy</button>
+                    <button type="submit" disabled={blocked || submitting || !confirmed} style={{ display: 'inline-flex', alignItems: 'center', gap: 7, border: 0, borderRadius: 10, background: '#7353e8', color: 'white', padding: '10px 14px', cursor: blocked || submitting || !confirmed ? 'not-allowed' : 'pointer', opacity: blocked || submitting || !confirmed ? .55 : 1, fontWeight: 700 }}>{submitting ? <LoaderCircle size={16} className="spin" /> : <Building2 size={16} />}{submitting ? 'Đang tạo và đọc trạng thái…' : pageMode === 'random' ? 'Tạo BM với Page ngẫu nhiên' : 'Tạo BM trên Meta'}</button>
+                  </div>
                 </form>
               )}
             </div>
