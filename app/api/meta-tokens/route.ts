@@ -19,16 +19,38 @@ const addSchema = z.object({
   token: z.string().trim().min(20).max(4096),
 });
 
+const updateSchema = z.object({
+  action: z.literal('update'),
+  id: z.string().uuid(),
+  label: z.string().trim().min(1).max(80),
+  token: z.string().trim().min(20).max(4096).optional().or(z.literal('')),
+});
+
 const idSchema = z.object({
   action: z.enum(['check', 'delete']),
   id: z.string().uuid(),
 });
 
-const requestSchema = z.union([addSchema, idSchema]);
+const requestSchema = z.union([addSchema, updateSchema, idSchema]);
 
 function sameOrigin(req: Request) {
   const origin = req.headers.get('origin');
   return !origin || origin === new URL(req.url).origin;
+}
+
+async function verifyToken(token: string) {
+  try {
+    const me = await graphWithToken(token, 'me', { fields: 'id,name' });
+    return {
+      me,
+      error: null as ReturnType<typeof classifyMetaTokenError> | null,
+    };
+  } catch (error) {
+    return {
+      me: null,
+      error: classifyMetaTokenError(error),
+    };
+  }
 }
 
 export async function GET() {
@@ -51,15 +73,12 @@ export async function POST(req: Request) {
     const input = requestSchema.parse(await req.json());
 
     if (input.action === 'add') {
-      let me: Record<string, unknown>;
-      try {
-        me = await graphWithToken(input.token, 'me', { fields: 'id,name' });
-      } catch (error) {
-        const classified = classifyMetaTokenError(error);
+      const checked = await verifyToken(input.token);
+      if (!checked.me || checked.error) {
         return Response.json(
           {
-            error: `Không lưu token vì Meta chưa xác nhận token hoạt động: ${classified.reason}`,
-            tokenStatus: classified.status,
+            error: `Không lưu token vì Meta chưa xác nhận token hoạt động: ${checked.error?.reason || 'Không xác định'}`,
+            tokenStatus: checked.error?.status,
           },
           { status: 400 },
         );
@@ -74,8 +93,8 @@ export async function POST(req: Request) {
         status: 'active',
         created: now,
         updated: now,
-        metaUserId: String(me.id || ''),
-        metaUserName: String(me.name || ''),
+        metaUserId: String(checked.me.id || ''),
+        metaUserName: String(checked.me.name || ''),
         lastCheckedAt: now,
       };
 
@@ -84,6 +103,53 @@ export async function POST(req: Request) {
         audit(user, `Thêm token nguồn: ${record.label}`),
       ]);
       return Response.json({ token: publicToken(record), message: 'Đã lưu token nguồn an toàn.' });
+    }
+
+    if (input.action === 'update') {
+      const record = await getMetaTokenRecord(user, input.id);
+      const nextLabel = input.label.trim();
+      const replacement = input.token?.trim() || '';
+      const now = new Date().toISOString();
+
+      if (!replacement) {
+        const updated: MetaTokenRecord = { ...record, label: nextLabel, updated: now };
+        await db().batch([
+          put(user, 'meta-token', updated),
+          audit(user, `Đổi tên token nguồn: ${record.label} → ${nextLabel}`),
+        ]);
+        return Response.json({ token: publicToken(updated), message: 'Đã cập nhật tên token.' });
+      }
+
+      const checked = await verifyToken(replacement);
+      if (!checked.me || checked.error) {
+        return Response.json(
+          {
+            error: `Không thay token vì token mới chưa được Meta xác nhận hoạt động: ${checked.error?.reason || 'Không xác định'}`,
+            tokenStatus: checked.error?.status,
+          },
+          { status: 400 },
+        );
+      }
+
+      const updated: MetaTokenRecord = {
+        ...record,
+        label: nextLabel,
+        encrypted: await encryptToken(replacement),
+        fingerprint: await tokenFingerprint(replacement),
+        status: 'active',
+        updated: now,
+        metaUserId: String(checked.me.id || ''),
+        metaUserName: String(checked.me.name || ''),
+        lastCheckedAt: now,
+        lastError: undefined,
+        lastErrorCode: undefined,
+        lastErrorSubcode: undefined,
+      };
+      await db().batch([
+        put(user, 'meta-token', updated),
+        audit(user, `Cập nhật token nguồn: ${record.label}`),
+      ]);
+      return Response.json({ token: publicToken(updated), message: 'Đã kiểm tra và thay token mới an toàn.' });
     }
 
     if (input.action === 'delete') {
