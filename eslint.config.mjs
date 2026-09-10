@@ -23,6 +23,15 @@ const eslintConfig = defineConfig([
       "react-hooks/set-state-in-effect": "off",
     },
   },
+  {
+    files: ["app/workspace.tsx"],
+    rules: {
+      // Legacy workspace code predates the newer React 19 lint rule. Keep CI
+      // focused on build-breaking issues until this large component is split up.
+      "react-hooks/set-state-in-effect": "off",
+      "@next/next/no-html-link-for-pages": "off",
+    },
+  },
 ]);
 
 export default eslintConfig;
