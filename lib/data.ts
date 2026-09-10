@@ -1,4 +1,30 @@
-export type Asset = { id:string; name:string; type:string; status:string; verified:boolean; country:string; tier:string; limit:string; parent:string; source:string; checked?:string; currency?:string; metaStatus?:number; healthNote?:string };
+export type Asset = {
+ id:string;
+ name:string;
+ type:string;
+ status:string;
+ verified:boolean;
+ country:string;
+ tier:string;
+ limit:string;
+ parent:string;
+ source:string;
+ checked?:string;
+ currency?:string;
+ metaStatus?:number;
+ healthNote?:string;
+ metaId?:string;
+ verificationStatus?:string;
+ creationTime?:string;
+ timezoneId?:string;
+ primaryPageId?:string;
+ primaryPageName?:string;
+ createdById?:string;
+ createdByName?:string;
+ adminEmail?:string;
+ adminInviteStatus?:string;
+ adminInviteError?:string;
+};
 export type Entry = { id:string; name:string; status:string; created:string; [key:string]:unknown };
 export const types = ['BM', 'TKQC', 'Page', 'Dataset/Pixel'];
 export const demoAssets:Asset[] = Array.from({length:24},(_,i)=>({
