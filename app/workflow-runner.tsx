@@ -104,9 +104,12 @@ export default function WorkflowRunner() {
   }, [load, queue]);
 
   useEffect(() => {
-    void load();
+    const initial = window.setTimeout(() => void load(), 0);
     const timer = window.setInterval(() => void load(), 5000);
-    return () => window.clearInterval(timer);
+    return () => {
+      window.clearTimeout(initial);
+      window.clearInterval(timer);
+    };
   }, [load]);
 
   const hasActive = useMemo(() => jobs.some((job) => isActive(job.status)), [jobs]);
@@ -128,9 +131,12 @@ export default function WorkflowRunner() {
       }
     };
 
-    void tick();
+    const initial = window.setTimeout(() => void tick(), 0);
     const timer = window.setInterval(() => void tick(), 2500);
-    return () => window.clearInterval(timer);
+    return () => {
+      window.clearTimeout(initial);
+      window.clearInterval(timer);
+    };
   }, [hasActive, load, queue]);
 
   const actionable = jobs.filter((job) => isWaiting(job.status) || isActive(job.status) || job.status === 'Tạm dừng' || job.status === 'Cần đối chiếu');
