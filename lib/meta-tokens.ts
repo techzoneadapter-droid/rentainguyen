@@ -193,8 +193,8 @@ export function classifyMetaTokenError(error: unknown): {
   code?: number;
   subcode?: number;
 } {
-  const message = error instanceof Error ? error.message : String(error);
-  const lower = message.toLowerCase();
+  const rawMessage = error instanceof Error ? error.message : String(error);
+  const lower = rawMessage.toLowerCase();
   const code = error instanceof MetaTokenError ? error.code : undefined;
   const subcode = error instanceof MetaTokenError ? error.subcode : undefined;
 
@@ -220,5 +220,10 @@ export function classifyMetaTokenError(error: unknown): {
     status = 'permission_issue';
   }
 
-  return { status, reason: message, code, subcode };
+  let reason = rawMessage;
+  if (code === 1 && subcode === 1690114) {
+    reason = `${rawMessage}. Meta trả subcode 1690114 nhưng không mô tả nguyên nhân cụ thể. Token không bị coi là chết chỉ vì lỗi này; nếu /me và danh sách Page vẫn đọc được thì cần đối chiếu điều kiện tạo Business, quyền/app access và trạng thái tài khoản trên Meta.`;
+  }
+
+  return { status, reason, code, subcode };
 }

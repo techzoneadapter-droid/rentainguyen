@@ -6,10 +6,13 @@ import {
   CheckCircle2,
   KeyRound,
   LoaderCircle,
+  Pencil,
   Plus,
   RefreshCw,
+  Save,
   ShieldAlert,
   Trash2,
+  X,
 } from 'lucide-react';
 
 type TokenStatus =
@@ -61,6 +64,9 @@ export default function TokenWorkspaceSection() {
   const [loading, setLoading] = useState(false);
   const [adding, setAdding] = useState(false);
   const [busyId, setBusyId] = useState('');
+  const [editingId, setEditingId] = useState('');
+  const [editLabel, setEditLabel] = useState('');
+  const [editToken, setEditToken] = useState('');
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
 
@@ -186,6 +192,51 @@ export default function TokenWorkspaceSection() {
     }
   }
 
+  function beginEdit(token: TokenItem) {
+    setEditingId(token.id);
+    setEditLabel(token.label);
+    setEditToken('');
+    setError('');
+    setMessage('');
+  }
+
+  function cancelEdit() {
+    setEditingId('');
+    setEditLabel('');
+    setEditToken('');
+  }
+
+  async function saveEdit(id: string) {
+    if (!editLabel.trim()) {
+      setError('Tên gợi nhớ không được để trống.');
+      return;
+    }
+    setBusyId(id);
+    setError('');
+    setMessage('');
+    try {
+      const response = await fetch('/api/meta-tokens', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'update',
+          id,
+          label: editLabel.trim(),
+          token: editToken.trim(),
+        }),
+      });
+      const result = (await response.json()) as ApiResponse;
+      if (!response.ok) throw new Error(result.error || 'Không sửa được token.');
+      setMessage(result.message || 'Đã cập nhật token.');
+      cancelEdit();
+      await load();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusyId('');
+    }
+  }
+
   const navPortal = navTarget
     ? createPortal(
         <button
@@ -248,7 +299,7 @@ export default function TokenWorkspaceSection() {
               </button>
             </form>
             <p className="muted" style={{ fontSize: 11, lineHeight: 1.6, marginTop: 11 }}>
-              App không tự chuyển token khi Meta giới hạn một tài khoản. Bạn chủ động chọn token nguồn trong trình tạo BM.
+              Muốn thay token đã lưu, bấm biểu tượng bút chì ở dòng tương ứng. Token mới sẽ được Meta kiểm tra trước khi thay thế token cũ.
             </p>
           </section>
 
@@ -278,28 +329,50 @@ export default function TokenWorkspaceSection() {
                   <tbody>
                     {tokens.map((token) => {
                       const info = statusInfo[token.status];
+                      const editing = editingId === token.id;
                       return (
                         <tr key={token.id}>
-                          <td>
-                            <strong style={{ display: 'block', color: '#505464' }}>{token.label}</strong>
-                            <small className="muted">{token.metaUserName || 'Chưa nhận diện user'} {token.metaUserId ? `· ${token.metaUserId}` : ''}</small>
-                            <small style={{ display: 'block', color: '#a2a4ae', fontFamily: 'ui-monospace,monospace' }}>FP {token.fingerprint}</small>
+                          <td style={{ minWidth: editing ? 330 : undefined }}>
+                            {editing ? (
+                              <div style={{ display: 'grid', gap: 7 }}>
+                                <input value={editLabel} onChange={(event) => setEditLabel(event.target.value)} maxLength={80} placeholder="Tên gợi nhớ" />
+                                <input value={editToken} onChange={(event) => setEditToken(event.target.value)} type="password" minLength={20} maxLength={4096} autoComplete="off" placeholder="Token mới (để trống nếu chỉ đổi tên)" />
+                                <small className="muted">Token hiện tại không bao giờ được hiển thị lại. Dán token mới nếu muốn thay thế.</small>
+                              </div>
+                            ) : (
+                              <>
+                                <strong style={{ display: 'block', color: '#505464' }}>{token.label}</strong>
+                                <small className="muted">{token.metaUserName || 'Chưa nhận diện user'} {token.metaUserId ? `· ${token.metaUserId}` : ''}</small>
+                                <small style={{ display: 'block', color: '#a2a4ae', fontFamily: 'ui-monospace,monospace' }}>FP {token.fingerprint}</small>
+                              </>
+                            )}
                           </td>
                           <td><span style={{ display: 'inline-block', padding: '5px 8px', borderRadius: 999, background: info.bg, color: info.color, fontWeight: 600 }}>{info.label}</span></td>
                           <td>{formatDate(token.lastCheckedAt)}</td>
                           <td>{formatDate(token.lastCreateAt)}</td>
                           <td style={{ maxWidth: 330, whiteSpace: 'normal' }}>
                             {token.lastCreateResult || token.lastError || 'Chưa có'}
+                            {token.lastError && token.lastCreateResult && <small style={{ display: 'block', marginTop: 4, color: '#a13a35' }}>{token.lastError}</small>}
                           </td>
                           <td>
-                            <div style={{ display: 'flex', gap: 7 }}>
-                              <button className="icon-button" type="button" disabled={busyId === token.id} onClick={() => void tokenAction('check', token.id)} title="Kiểm tra lại token">
-                                {busyId === token.id ? <LoaderCircle size={16} className="spin" /> : <RefreshCw size={16} />}
-                              </button>
-                              <button className="icon-button" type="button" disabled={busyId === token.id} onClick={() => void tokenAction('delete', token.id)} title="Xóa token" style={{ color: '#b34d55' }}>
-                                <Trash2 size={16} />
-                              </button>
-                            </div>
+                            {editing ? (
+                              <div style={{ display: 'flex', gap: 7 }}>
+                                <button className="icon-button" type="button" disabled={busyId === token.id} onClick={() => void saveEdit(token.id)} title="Lưu thay đổi" style={{ color: '#176b37' }}>
+                                  {busyId === token.id ? <LoaderCircle size={16} className="spin" /> : <Save size={16} />}
+                                </button>
+                                <button className="icon-button" type="button" disabled={busyId === token.id} onClick={cancelEdit} title="Hủy sửa"><X size={16} /></button>
+                              </div>
+                            ) : (
+                              <div style={{ display: 'flex', gap: 7 }}>
+                                <button className="icon-button" type="button" disabled={Boolean(busyId)} onClick={() => beginEdit(token)} title="Sửa tên hoặc thay token"><Pencil size={16} /></button>
+                                <button className="icon-button" type="button" disabled={busyId === token.id} onClick={() => void tokenAction('check', token.id)} title="Kiểm tra lại token">
+                                  {busyId === token.id ? <LoaderCircle size={16} className="spin" /> : <RefreshCw size={16} />}
+                                </button>
+                                <button className="icon-button" type="button" disabled={busyId === token.id} onClick={() => void tokenAction('delete', token.id)} title="Xóa token" style={{ color: '#b34d55' }}>
+                                  <Trash2 size={16} />
+                                </button>
+                              </div>
+                            )}
                           </td>
                         </tr>
                       );
