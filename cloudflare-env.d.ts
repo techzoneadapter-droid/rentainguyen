@@ -4,5 +4,6 @@ declare namespace Cloudflare {
     BUCKET?: R2Bucket;
     META_ACCESS_TOKEN?: string;
     META_API_VERSION?: string;
+    TOKEN_ENCRYPTION_KEY?: string;
   }
 }
