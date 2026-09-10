@@ -37,7 +37,7 @@ function repair(value: string) {
   }
 }
 
-function repairElement(root: ParentNode) {
+function repairElement(root: Document | Element) {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   const nodes: Text[] = [];
   while (walker.nextNode()) nodes.push(walker.currentNode as Text);
@@ -46,14 +46,12 @@ function repairElement(root: ParentNode) {
     if (fixed !== node.data) node.data = fixed;
   }
 
-  if ('querySelectorAll' in root) {
-    for (const element of root.querySelectorAll<HTMLElement>('[placeholder],[aria-label],[title]')) {
-      for (const attr of ['placeholder', 'aria-label', 'title']) {
-        const value = element.getAttribute(attr);
-        if (!value) continue;
-        const fixed = repair(value);
-        if (fixed !== value) element.setAttribute(attr, fixed);
-      }
+  for (const element of root.querySelectorAll<HTMLElement>('[placeholder],[aria-label],[title]')) {
+    for (const attr of ['placeholder', 'aria-label', 'title']) {
+      const value = element.getAttribute(attr);
+      if (!value) continue;
+      const fixed = repair(value);
+      if (fixed !== value) element.setAttribute(attr, fixed);
     }
   }
 }
