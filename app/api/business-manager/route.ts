@@ -157,6 +157,32 @@ export async function POST(req: Request) {
       throw new Error('Meta không trả về app-scoped User ID hợp lệ.');
     }
 
+    let pageProbe: MetaObject;
+    try {
+      pageProbe = await graphWithToken(token, input.primaryPage, { fields: 'id,name' });
+      if (stringValue(pageProbe.id) !== input.primaryPage) {
+        throw new Error('Meta trả về Page ID không khớp với Page đã chọn.');
+      }
+    } catch (error) {
+      const classified = classifyMetaTokenError(error);
+      await updateMetaToken(workspaceOwner, currentRecord, {
+        status: classified.status === 'unknown_error' ? currentRecord.status : classified.status,
+        lastUsedAt: now,
+        lastCreateAt: now,
+        lastCreateResult: 'failed_page_precheck',
+        lastError: `Page ${input.primaryPage} không vượt qua bước kiểm tra trước khi tạo BM: ${classified.reason}`,
+        lastErrorCode: classified.code,
+        lastErrorSubcode: classified.subcode,
+      });
+      return Response.json(
+        {
+          error: `Không gửi yêu cầu tạo BM vì Page ${input.primaryPage} không đọc được bằng token đã chọn. ${classified.reason}`,
+          tokenStatus: currentRecord.status,
+        },
+        { status: 400 },
+      );
+    }
+
     let createResult: MetaObject;
     try {
       createResult = await graphPostWithToken(token, `${metaUserId}/businesses`, {
@@ -176,11 +202,16 @@ export async function POST(req: Request) {
         lastErrorCode: classified.code,
         lastErrorSubcode: classified.subcode,
       });
+      const opaqueCreateError = classified.code === 1 && classified.subcode === 1690114;
       return Response.json(
         {
-          error: `${classified.reason} Không tự gửi lại yêu cầu. Nếu đây là lỗi timeout/kết nối, hãy kiểm tra Meta Business Settings trước khi thử lại để tránh tạo trùng.`,
+          error: opaqueCreateError
+            ? `${classified.reason} App đã xác nhận token và Page đều đọc được trước khi gửi lệnh tạo. Vì Meta không cung cấp nguyên nhân cụ thể cho subcode này, app giữ token ở trạng thái hiện tại và không tự retry.`
+            : `${classified.reason} Không tự gửi lại yêu cầu. Nếu đây là lỗi timeout/kết nối, hãy kiểm tra Meta Business Settings trước khi thử lại để tránh tạo trùng.`,
           tokenStatus: updated.status,
           token: publicToken(updated),
+          page: { id: stringValue(pageProbe.id), name: stringValue(pageProbe.name) },
+          metaError: { code: classified.code, subcode: classified.subcode },
         },
         { status: 400 },
       );
@@ -213,7 +244,7 @@ export async function POST(req: Request) {
     const primaryPage = objectValue(business.primary_page);
     const createdBy = objectValue(business.created_by);
     const primaryPageId = stringValue(primaryPage.id) || input.primaryPage;
-    const primaryPageName = stringValue(primaryPage.name);
+    const primaryPageName = stringValue(primaryPage.name) || stringValue(pageProbe.name);
     const creationTime = stringValue(business.creation_time) || now;
     const timezoneId = stringValue(business.timezone_id) || String(input.timezone);
 
