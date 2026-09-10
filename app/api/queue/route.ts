@@ -1,7 +1,12 @@
-import { owner } from '../../../lib/server';
+import { list, owner } from '../../../lib/server';
 import { pause, resume, start, tick } from '../../../lib/workflows';
 
 type QueueAction = 'start' | 'pause' | 'resume' | 'tick';
+
+type StoredJob = {
+  id: string;
+  operation?: string;
+};
 
 function validAction(value: unknown): value is QueueAction {
   return value === 'start' || value === 'pause' || value === 'resume' || value === 'tick';
@@ -29,6 +34,17 @@ export async function POST(req: Request) {
     }
 
     if (input.action === 'start') {
+      const jobs = (await list(user, 'job')) as StoredJob[];
+      const job = jobs.find((item) => item.id === input.id);
+      if (job?.operation === 'create') {
+        return Response.json(
+          {
+            error:
+              'Tạo tài nguyên thật hiện chỉ bật cho Business Manager, 1 BM mỗi lần. Hãy vào trang Business Manager và bấm “Tạo tài nguyên” hoặc “Tạo BM thật”.',
+          },
+          { status: 400 },
+        );
+      }
       await start(user, input.id);
       return Response.json({ message: 'Đã bắt đầu workflow. Giữ ứng dụng mở để xử lý hàng đợi.' });
     }
