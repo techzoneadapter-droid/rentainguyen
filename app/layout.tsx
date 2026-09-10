@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import "./typography-fix.css";
 
 export const metadata: Metadata = {
   title: "Ads Workspace · Quản lý tài nguyên Meta",

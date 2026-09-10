@@ -12,12 +12,12 @@ const cp1252 = new Map<number, number>([
   [0x0153, 0x9c], [0x017e, 0x9e], [0x0178, 0x9f],
 ]);
 
-const suspicious = /(?:Ã.|Â.|Ä.|Æ.|á[º»]|â[€žœ™¦]|ðŸ)/;
+const suspicious = /(?:Ã.|Â.|Ä.|Æ.|á[º»]|â[€žœ™¦]|ðŸ|ï¿½)/;
 
-function repair(value: string) {
+function decodeOnce(value: string) {
   if (!suspicious.test(value)) return value;
-
   const bytes: number[] = [];
+
   for (const char of value) {
     const code = char.codePointAt(0)!;
     if (code <= 0xff) {
@@ -35,6 +35,16 @@ function repair(value: string) {
   } catch {
     return value;
   }
+}
+
+function repair(value: string) {
+  let current = value;
+  for (let pass = 0; pass < 3; pass++) {
+    const decoded = decodeOnce(current);
+    if (decoded === current) break;
+    current = decoded;
+  }
+  return current.normalize('NFC');
 }
 
 function repairElement(root: Document | Element) {

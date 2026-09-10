@@ -1,5 +1,5 @@
-import TokenManager from '../token-manager';
+import { redirect } from 'next/navigation';
 
 export default function TokensPage() {
-  return <TokenManager />;
+  redirect('/');
 }

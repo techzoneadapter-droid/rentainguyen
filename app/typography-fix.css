@@ -1,0 +1,65 @@
+:root {
+  font-family: "Segoe UI Variable Text", "Segoe UI", Tahoma, Arial, sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body,
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+}
+
+h1,
+h2,
+h3,
+strong,
+.nav-item,
+.workspace-select,
+.button {
+  font-kerning: normal;
+  font-variant-ligatures: common-ligatures;
+}
+
+h1 {
+  letter-spacing: -0.35px;
+}
+
+h2,
+h3 {
+  letter-spacing: -0.15px;
+}
+
+.token-workspace-main input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid #e2e4eb;
+  border-radius: 7px;
+  background: #fff;
+  padding: 10px 11px;
+  color: #505464;
+  outline: none;
+}
+
+.token-workspace-main input:focus {
+  border-color: #b9a8e8;
+  box-shadow: 0 0 0 3px #7656d914;
+}
+
+.token-workspace-main input::placeholder {
+  color: #a2a6b1;
+}
+
+@media (max-width: 860px) {
+  .token-workspace-main form {
+    grid-template-columns: 1fr !important;
+  }
+
+  .token-workspace-main > section:first-of-type {
+    grid-template-columns: 1fr !important;
+  }
+}
