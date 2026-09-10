@@ -86,10 +86,13 @@ export default function TokenWorkspaceSection() {
   }, []);
 
   useEffect(() => {
-    findTargets();
+    const timer = window.setTimeout(findTargets, 0);
     const observer = new MutationObserver(findTargets);
     observer.observe(document.body, { childList: true, subtree: true });
-    return () => observer.disconnect();
+    return () => {
+      window.clearTimeout(timer);
+      observer.disconnect();
+    };
   }, [findTargets]);
 
   useEffect(() => {
@@ -113,9 +116,10 @@ export default function TokenWorkspaceSection() {
     const oldBreadcrumb = breadcrumb?.textContent || '';
     if (originalMain) originalMain.style.display = 'none';
     if (breadcrumb) breadcrumb.textContent = 'Quản lý token';
-    void load();
+    const timer = window.setTimeout(() => void load(), 0);
 
     return () => {
+      window.clearTimeout(timer);
       if (originalMain) originalMain.style.display = oldDisplay;
       if (breadcrumb) breadcrumb.textContent = oldBreadcrumb;
     };
