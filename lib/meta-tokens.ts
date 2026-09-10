@@ -31,7 +31,14 @@ export type MetaTokenRecord = {
 export type PublicMetaToken = Omit<MetaTokenRecord, 'encrypted'>;
 
 type GraphBody = {
-  error?: { message?: string; code?: number; error_subcode?: number };
+  error?: {
+    message?: string;
+    code?: number;
+    error_subcode?: number;
+    error_user_title?: string;
+    error_user_msg?: string;
+    is_transient?: boolean;
+  };
   [key: string]: unknown;
 };
 
@@ -140,7 +147,12 @@ export async function updateMetaToken(
 function makeMetaError(response: Response, body: GraphBody) {
   const code = body.error?.code || response.status;
   const subcode = body.error?.error_subcode;
-  const detail = body.error?.message || 'Meta không trả về dữ liệu hợp lệ.';
+  const details = [
+    body.error?.error_user_title?.trim(),
+    body.error?.error_user_msg?.trim(),
+    body.error?.message?.trim(),
+  ].filter((value): value is string => Boolean(value));
+  const detail = [...new Set(details)].join(' — ') || 'Meta không trả về dữ liệu hợp lệ.';
   const suffix = subcode ? `/${subcode}` : '';
   return new MetaTokenError(`Meta ${code}${suffix}: ${detail}`, {
     code,
@@ -210,7 +222,8 @@ export function classifyMetaTokenError(error: unknown): {
   ) {
     status = 'rate_limited';
   } else if (
-    /business.*(limit|maximum|too many|cannot create|can't create|not eligible)|(limit|maximum).*business|reached.*business|create.*business.*restricted|not eligible.*business/.test(lower)
+    subcode === 1690114 ||
+    /đã đạt giới hạn số doanh nghiệp|giới hạn số doanh nghiệp|business.*(limit|maximum|too many|cannot create|can't create|not eligible)|(limit|maximum).*business|reached.*business|create.*business.*restricted|not eligible.*business/.test(lower)
   ) {
     status = 'create_restricted';
   } else if (
@@ -221,8 +234,8 @@ export function classifyMetaTokenError(error: unknown): {
   }
 
   let reason = rawMessage;
-  if (code === 1 && subcode === 1690114) {
-    reason = `${rawMessage}. Meta trả subcode 1690114 nhưng không mô tả nguyên nhân cụ thể. Token không bị coi là chết chỉ vì lỗi này; nếu /me và danh sách Page vẫn đọc được thì cần đối chiếu điều kiện tạo Business, quyền/app access và trạng thái tài khoản trên Meta.`;
+  if (subcode === 1690114) {
+    reason = `${rawMessage}. Tài khoản Meta đứng sau token hiện đã đạt giới hạn tạo Business. Token vẫn có thể dùng cho các thao tác được Meta cho phép; app sẽ không tự retry hoặc tự chuyển token.`;
   }
 
   return { status, reason, code, subcode };
