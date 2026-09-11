@@ -6,6 +6,14 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
+body.encoding-pending {
+  visibility: hidden;
+}
+
+body.encoding-ready {
+  visibility: visible;
+}
+
 body,
 button,
 input,
