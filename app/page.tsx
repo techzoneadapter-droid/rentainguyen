@@ -1,4 +1,5 @@
 import BusinessManagerCreator from './business-manager-creator';
+import CrmResourcePush from './crm-resource-push';
 import EncodingRepair from './encoding-repair';
 import MetaOAuthConnector from './meta-oauth-connector';
 import TokenWorkspaceSection from './token-workspace-section';
@@ -12,6 +13,7 @@ export default function Page() {
       <Workspace />
       <TokenWorkspaceSection />
       <MetaOAuthConnector />
+      <CrmResourcePush />
       <BusinessManagerCreator />
       <WorkflowRunner />
     </>
