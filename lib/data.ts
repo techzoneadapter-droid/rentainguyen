@@ -24,6 +24,10 @@ export type Asset = {
  adminEmail?:string;
  adminInviteStatus?:string;
  adminInviteError?:string;
+ crmPushStatus?:string;
+ crmPushAt?:string;
+ crmResourceId?:string;
+ crmBatchId?:string;
 };
 export type Entry = { id:string; name:string; status:string; created:string; [key:string]:unknown };
 export const types = ['BM', 'TKQC', 'Page', 'Dataset/Pixel'];
