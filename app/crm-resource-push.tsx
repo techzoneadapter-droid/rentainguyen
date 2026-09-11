@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom';
 import { AlertTriangle, CheckCircle2, LoaderCircle, Send } from 'lucide-react';
 
 type Notice = { kind: 'success' | 'error'; message: string } | null;
+type RowTarget = { metaId: string; element: Element };
 
 type PushResponse = {
   ok?: boolean;
@@ -14,26 +15,47 @@ type PushResponse = {
   rejected?: Array<{ index: number; error: string }>;
 };
 
+function metaIdFromRow(row: Element) {
+  const text = row.querySelector('.asset-name small')?.textContent || '';
+  return text.match(/\b\d{5,30}\b/)?.[0] || '';
+}
+
 function selectedMetaIds() {
   const ids = new Set<string>();
   const rows = document.querySelectorAll('.resources-panel tbody tr');
   for (const row of rows) {
     const checkbox = row.querySelector('td:first-child input[type="checkbox"]');
     if (!(checkbox instanceof HTMLInputElement) || !checkbox.checked) continue;
-    const text = row.querySelector('.asset-name small')?.textContent || '';
-    const match = text.match(/\b\d{5,30}\b/);
-    if (match) ids.add(match[0]);
+    const id = metaIdFromRow(row);
+    if (id) ids.add(id);
   }
   return [...ids];
 }
 
+function sameTargets(a: RowTarget[], b: RowTarget[]) {
+  return a.length === b.length && a.every((item, index) => item.metaId === b[index]?.metaId && item.element === b[index]?.element);
+}
+
 export default function CrmResourcePush() {
-  const [target, setTarget] = useState<Element | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [selectionTarget, setSelectionTarget] = useState<Element | null>(null);
+  const [rowTargets, setRowTargets] = useState<RowTarget[]>([]);
+  const [busyKey, setBusyKey] = useState('');
   const [notice, setNotice] = useState<Notice>(null);
 
   useEffect(() => {
-    const sync = () => setTarget(document.querySelector('.resources-panel .selection-bar'));
+    const sync = () => {
+      const nextSelection = document.querySelector('.resources-panel .selection-bar');
+      setSelectionTarget((previous) => previous === nextSelection ? previous : nextSelection);
+
+      const nextRows: RowTarget[] = [];
+      for (const row of document.querySelectorAll('.resources-panel tbody tr')) {
+        const metaId = metaIdFromRow(row);
+        const cell = row.querySelector('td:last-child');
+        if (metaId && cell) nextRows.push({ metaId, element: cell });
+      }
+      setRowTargets((previous) => sameTargets(previous, nextRows) ? previous : nextRows);
+    };
+
     sync();
     const observer = new MutationObserver(sync);
     observer.observe(document.body, { childList: true, subtree: true });
@@ -46,17 +68,16 @@ export default function CrmResourcePush() {
     return () => window.clearTimeout(timer);
   }, [notice]);
 
-  async function pushSelected() {
-    const metaIds = selectedMetaIds();
+  async function push(metaIds: string[], key: string) {
     if (!metaIds.length) {
       setNotice({
         kind: 'error',
-        message: 'Không tìm thấy Meta ID trong các dòng đã chọn. CRM chỉ nhận BM, TKQC hoặc Page đã có Meta ID.',
+        message: 'Không tìm thấy Meta ID. CRM chỉ nhận BM, TKQC hoặc Page đã có Meta ID.',
       });
       return;
     }
 
-    setBusy(true);
+    setBusyKey(key);
     try {
       const response = await fetch('/api/crm-push', {
         method: 'POST',
@@ -73,19 +94,40 @@ export default function CrmResourcePush() {
     } catch (error) {
       setNotice({ kind: 'error', message: error instanceof Error ? error.message : 'Không đẩy được tài nguyên sang CRM.' });
     } finally {
-      setBusy(false);
+      setBusyKey('');
     }
   }
 
-  const button = target
+  const selectionButton = selectionTarget
     ? createPortal(
-        <button type="button" disabled={busy} onClick={() => void pushSelected()} title="Đẩy tài nguyên đã chọn sang kho BVAGC CRM">
-          {busy ? <LoaderCircle size={14} className="spin" /> : <Send size={14} />}
-          {busy ? 'Đang push CRM…' : 'Push sang CRM'}
+        <button
+          type="button"
+          disabled={Boolean(busyKey)}
+          onClick={() => void push(selectedMetaIds(), 'selection')}
+          title="Đẩy các tài nguyên đang chọn sang kho BVAGC CRM"
+        >
+          {busyKey === 'selection' ? <LoaderCircle size={14} className="spin" /> : <Send size={14} />}
+          {busyKey === 'selection' ? 'Đang push CRM…' : 'Push sang CRM'}
         </button>,
-        target,
+        selectionTarget,
       )
     : null;
+
+  const rowButtons = rowTargets.map(({ metaId, element }) => createPortal(
+    <button
+      key={`crm-${metaId}`}
+      className="button compact"
+      type="button"
+      disabled={Boolean(busyKey)}
+      onClick={() => void push([metaId], metaId)}
+      title={`Push tài nguyên ${metaId} sang BVAGC CRM`}
+      style={{ marginLeft: 6, whiteSpace: 'nowrap' }}
+    >
+      {busyKey === metaId ? <LoaderCircle size={13} className="spin" /> : <Send size={13} />}
+      {busyKey === metaId ? 'Đang push' : 'Push CRM'}
+    </button>,
+    element,
+  ));
 
   const noticePortal = notice
     ? createPortal(
@@ -116,5 +158,5 @@ export default function CrmResourcePush() {
       )
     : null;
 
-  return <>{button}{noticePortal}</>;
+  return <>{selectionButton}{rowButtons}{noticePortal}</>;
 }
