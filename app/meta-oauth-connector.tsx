@@ -14,14 +14,8 @@ export default function MetaOAuthConnector() {
     const params = new URLSearchParams(window.location.search);
     const result = params.get('metaOauth');
     const message = params.get('message') || '';
-    if (result === 'success' || result === 'error') {
-      setNotice({
-        kind: result,
-        message: message || (result === 'success' ? 'Đã kết nối Facebook.' : 'Không kết nối được Facebook.'),
-      });
-    }
-
     let opened = false;
+
     const sync = () => {
       const target = document.querySelector('.token-workspace-main .heading-actions');
       setActionTarget(target);
@@ -39,10 +33,22 @@ export default function MetaOAuthConnector() {
       }
     };
 
-    sync();
     const observer = new MutationObserver(sync);
     observer.observe(document.body, { childList: true, subtree: true });
-    return () => observer.disconnect();
+    const timer = window.setTimeout(() => {
+      if (result === 'success' || result === 'error') {
+        setNotice({
+          kind: result,
+          message: message || (result === 'success' ? 'Đã kết nối Facebook.' : 'Không kết nối được Facebook.'),
+        });
+      }
+      sync();
+    }, 0);
+
+    return () => {
+      window.clearTimeout(timer);
+      observer.disconnect();
+    };
   }, []);
 
   const button = actionTarget
