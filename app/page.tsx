@@ -1,4 +1,5 @@
 import BusinessManagerCreator from './business-manager-creator';
+import CopyPolish from './copy-polish';
 import CrmResourcePush from './crm-resource-push';
 import EncodingRepair from './encoding-repair';
 import MetaOAuthConnector from './meta-oauth-connector';
@@ -10,6 +11,7 @@ export default function Page() {
   return (
     <>
       <EncodingRepair />
+      <CopyPolish />
       <Workspace />
       <TokenWorkspaceSection />
       <MetaOAuthConnector />
