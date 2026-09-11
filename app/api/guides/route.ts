@@ -113,9 +113,9 @@ export async function POST(req: Request) {
 
   try {
     const workspaceOwner = await owner();
-    const body = await req.json();
+    const body = (await req.json()) as Record<string, unknown>;
 
-    if (body?.action === 'prepare_upload') {
+    if (body.action === 'prepare_upload') {
       const input = prepareSchema.parse(body);
       const data = await callGateway({
         action: 'CREATE_UPLOAD',
@@ -132,7 +132,7 @@ export async function POST(req: Request) {
       });
     }
 
-    if (body?.action === 'save') {
+    if (body.action === 'save') {
       const input = saveSchema.parse(body);
       const id = crypto.randomUUID();
       const value: GuideAsset = {
@@ -193,14 +193,14 @@ export async function POST(req: Request) {
     const now = new Date().toISOString();
     const updates = chosen.map((guide) => {
       const ok = accepted.get(guide.id);
-      const error = rejected.get(guide.id);
+      const pushError = rejected.get(guide.id);
       return put(workspaceOwner, 'guide_asset', {
         ...guide,
         crmPushStatus: ok ? 'Đã đẩy' : 'Lỗi',
         crmPushAt: now,
         crmGuideId: ok?.id || guide.crmGuideId || '',
         crmGuideCode: ok?.code || guide.crmGuideCode || '',
-        crmPushError: error || '',
+        crmPushError: pushError || '',
       } as unknown as Record<string, unknown>);
     });
 
