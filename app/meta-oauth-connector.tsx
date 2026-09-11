@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { CheckCircle2, Facebook, ShieldAlert } from 'lucide-react';
+import { CheckCircle2, LogIn, ShieldAlert } from 'lucide-react';
 
 type OAuthNotice = { kind: 'success' | 'error'; message: string } | null;
 
@@ -59,7 +59,7 @@ export default function MetaOAuthConnector() {
           onClick={() => window.location.assign('/api/meta-oauth/start')}
           title="Kết nối tài khoản Facebook hiện tại bằng OAuth chính thức của Meta"
         >
-          <Facebook size={16} /> Kết nối Facebook
+          <LogIn size={16} /> Kết nối Facebook
         </button>,
         actionTarget,
       )
