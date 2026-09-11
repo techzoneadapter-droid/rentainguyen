@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useLayoutEffect } from 'react';
 
 const cp1252 = new Map<number, number>([
   [0x20ac, 0x80], [0x201a, 0x82], [0x0192, 0x83], [0x201e, 0x84],
@@ -67,8 +67,10 @@ function repairElement(root: Document | Element) {
 }
 
 export default function EncodingRepair() {
-  useEffect(() => {
+  useLayoutEffect(() => {
     repairElement(document.body);
+    document.body.classList.remove('encoding-pending');
+    document.body.classList.add('encoding-ready');
 
     const observer = new MutationObserver((mutations) => {
       for (const mutation of mutations) {
