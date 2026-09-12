@@ -62,7 +62,7 @@ export default function ProductionQueue() {
   const [formTokenId, setFormTokenId] = useState('');
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
-  const [now, setNow] = useState(Date.now());
+  const [now, setNow] = useState(0);
 
   const findTargets = useCallback(() => {
     const navs = document.querySelectorAll('.sidebar nav');
@@ -99,8 +99,10 @@ export default function ProductionQueue() {
   }, [findTargets]);
 
   useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
+    const update = () => setNow(Date.now());
+    const kickoff = window.setTimeout(update, 0);
+    const timer = window.setInterval(update, 1000);
+    return () => { window.clearTimeout(kickoff); window.clearInterval(timer); };
   }, []);
 
   useEffect(() => {
@@ -222,7 +224,7 @@ export default function ProductionQueue() {
   async function createNext(queue: Queue) {
     const pending = queue.items.find((item) => item.status === 'PENDING');
     if (!pending) return;
-    const wait = Math.max(0, Math.ceil((queue.nextAvailableAt - Date.now()) / 1000));
+    const wait = Math.max(0, Math.ceil((queue.nextAvailableAt - now) / 1000));
     if (wait > 0) {
       setError(`Hàng đợi đang chờ khoảng nghỉ. Còn ${wait} giây.`);
       return;
@@ -337,7 +339,7 @@ export default function ProductionQueue() {
             <div style={{ height: 7, borderRadius: 99, background: '#eef0f5', margin: '15px 0 12px', overflow: 'hidden' }}><div style={{ height: '100%', width: `${progress}%`, background: '#7454df' }}/></div>
             {queue.lastError && <div style={{ display: 'flex', gap: 8, padding: 10, borderRadius: 8, marginBottom: 11, background: '#fff0ef', color: '#a13a35' }}><AlertTriangle size={17}/>{queue.lastError}</div>}
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 13 }}>
-              {queue.status === 'READY' && <button className="button primary" disabled={!pending || busy || wait > 0} onClick={() => void createNext(queue)}>{busy ? <LoaderCircle size={16} className="spin"/> : <Play size={16}/>} {wait > 0 ? `Chờ ${wait}s` : pending ? `Tạo mục tiếp theo · ${pending.name}` : 'Không còn mục chờ'}</button>}
+              {queue.status === 'READY' && <button className="button primary" disabled={!pending || busy || wait > 0 || now === 0} onClick={() => void createNext(queue)}>{busy ? <LoaderCircle size={16} className="spin"/> : <Play size={16}/>} {wait > 0 ? `Chờ ${wait}s` : pending ? `Tạo mục tiếp theo · ${pending.name}` : 'Không còn mục chờ'}</button>}
               {queue.status === 'READY' && <button className="button" disabled={busy} onClick={() => void queueAction(queue, 'pause')}><Pause size={16}/>Tạm dừng</button>}
               {['PAUSED', 'PAUSED_ERROR'].includes(queue.status) && <button className="button" disabled={busy} onClick={() => void queueAction(queue, 'resume')}><Play size={16}/>Tiếp tục</button>}
               {queue.status === 'PAUSED_ERROR' && queue.items.some((item) => item.status === 'FAILED') && <button className="button" disabled={busy} onClick={() => void queueAction(queue, 'retry_failed')}><RotateCcw size={16}/>Đưa mục lỗi về chờ</button>}
