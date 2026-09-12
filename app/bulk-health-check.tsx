@@ -88,19 +88,6 @@ export default function BulkHealthCheck() {
     }
   }, []);
 
-  useEffect(() => {
-    if (!open) return;
-    setSelected([]);
-    setResults([]);
-    setMessage('');
-    setError('');
-    setQuery('');
-    setType('ALL');
-    setHealth('ALL');
-    setTokenId('');
-    void load();
-  }, [open, load]);
-
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
     return resources.filter((resource) => {
@@ -110,6 +97,19 @@ export default function BulkHealthCheck() {
       return `${resource.name} ${resource.metaId || resource.id} ${resource.sourceToken || ''}`.toLowerCase().includes(needle);
     });
   }, [resources, query, type, health]);
+
+  function openDialog() {
+    setSelected([]);
+    setResults([]);
+    setMessage('');
+    setError('');
+    setQuery('');
+    setType('ALL');
+    setHealth('ALL');
+    setTokenId('');
+    setOpen(true);
+    void load();
+  }
 
   function toggle(id: string) {
     setSelected((current) => current.includes(id) ? current.filter((item) => item !== id) : current.length >= 100 ? current : [...current, id]);
@@ -149,7 +149,7 @@ export default function BulkHealthCheck() {
   }
 
   const button = target ? createPortal(
-    <button className="button primary" type="button" onClick={() => setOpen(true)}>
+    <button className="button primary" type="button" onClick={openDialog}>
       <HeartPulse size={17} /> Health Check hàng loạt
     </button>,
     target,
