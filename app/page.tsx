@@ -1,3 +1,4 @@
+import BulkHealthCheck from './bulk-health-check';
 import BusinessManagerCreator from './business-manager-creator';
 import CopyPolish from './copy-polish';
 import CrmResourcePush from './crm-resource-push';
@@ -16,6 +17,7 @@ export default function Page() {
       <CopyPolish />
       <Workspace />
       <ResourceCenter />
+      <BulkHealthCheck />
       <GuideWorkspaceSection />
       <TokenWorkspaceSection />
       <MetaOAuthConnector />
