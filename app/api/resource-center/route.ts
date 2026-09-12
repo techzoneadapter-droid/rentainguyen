@@ -3,7 +3,7 @@ import { getMetaTokens } from '../../../lib/meta-tokens';
 import type { Asset } from '../../../lib/data';
 
 type HealthStatus = 'LIVE' | 'DIE' | 'RESTRICTED' | 'UNKNOWN' | 'N/A';
-type LifecycleStatus = 'NEW' | 'CHECKING' | 'READY' | 'BLOCKED' | 'PUSHED';
+type LifecycleStatus = 'NEW' | 'CHECKING' | 'READY' | 'PUSHED';
 
 type GuideAsset = {
   id: string;
@@ -62,7 +62,7 @@ function lifecycleOf(asset: Asset, health: HealthStatus): LifecycleStatus {
   const raw = upper(asset.status);
   if (raw.includes('ĐANG KIỂM TRA') || raw.includes('CHECKING')) return 'CHECKING';
   if (health === 'LIVE') return 'READY';
-  if (asset.checked || health === 'DIE' || health === 'RESTRICTED') return 'BLOCKED';
+  if (asset.checked || health === 'DIE' || health === 'RESTRICTED') return 'CHECKING';
   return 'NEW';
 }
 
@@ -125,7 +125,7 @@ export async function GET() {
         name: text(guide.title) || 'Bí kíp',
         type: 'Bí kíp',
         health: 'N/A',
-        lifecycle: isPushed ? 'PUSHED' : guide.crmPushError ? 'BLOCKED' : 'READY',
+        lifecycle: isPushed ? 'PUSHED' : guide.crmPushError ? 'CHECKING' : 'READY',
         source: 'manual-upload',
         sourceLabel: 'Tải lên thủ công',
         createdAt: text(guide.created) || undefined,
