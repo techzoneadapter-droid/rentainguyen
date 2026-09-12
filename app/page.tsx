@@ -7,6 +7,7 @@ import GuideWorkspaceSection from './guide-workspace-section';
 import MetaOAuthConnector from './meta-oauth-connector';
 import ProductionQueue from './production-queue';
 import ResourceCenter from './resource-center';
+import ResourcePresetManager from './resource-preset-manager';
 import TokenWorkspaceSection from './token-workspace-section';
 import Workspace from './workspace';
 import WorkflowRunner from './workflow-runner';
@@ -20,6 +21,7 @@ export default function Page() {
       <ResourceCenter />
       <BulkHealthCheck />
       <ProductionQueue />
+      <ResourcePresetManager />
       <GuideWorkspaceSection />
       <TokenWorkspaceSection />
       <MetaOAuthConnector />
