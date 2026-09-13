@@ -5,6 +5,7 @@ import CopyPolish from './copy-polish';
 import CrmResourcePush from './crm-resource-push';
 import EncodingRepair from './encoding-repair';
 import EztoolDashboard from './eztool-dashboard';
+import EztoolReferenceSkin from './eztool-reference-skin';
 import GuideWorkspaceSection from './guide-workspace-section';
 import MetaOAuthConnector from './meta-oauth-connector';
 import ProductionQueue from './production-queue';
@@ -20,6 +21,7 @@ export default function Page() {
       <EncodingRepair />
       <CopyPolish />
       <EztoolDashboard />
+      <EztoolReferenceSkin />
       <BulkTokenCenter />
       <TokenImportCompat />
       <TokenWorkspaceSection />
