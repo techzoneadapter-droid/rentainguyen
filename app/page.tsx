@@ -18,13 +18,13 @@ export default function Page() {
       <EncodingRepair />
       <CopyPolish />
       <EztoolDashboard />
+      <TokenWorkspaceSection />
       <BmTokenCreatorHub />
       <ResourceCenter />
       <BulkHealthCheck />
       <ProductionQueue />
       <ResourcePresetManager />
       <GuideWorkspaceSection />
-      <TokenWorkspaceSection />
       <MetaOAuthConnector />
       <CrmResourcePush />
       <WorkflowRunner />
