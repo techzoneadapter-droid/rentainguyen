@@ -1,4 +1,5 @@
 import BulkHealthCheck from './bulk-health-check';
+import BmTokenCreatorHub from './bm-token-creator-hub';
 import CopyPolish from './copy-polish';
 import CrmResourcePush from './crm-resource-push';
 import EncodingRepair from './encoding-repair';
@@ -6,7 +7,6 @@ import GuideWorkspaceSection from './guide-workspace-section';
 import MetaOAuthConnector from './meta-oauth-connector';
 import ProductionQueue from './production-queue';
 import ResourceCenter from './resource-center';
-import ResourceCreationHub from './resource-creation-hub';
 import ResourcePresetManager from './resource-preset-manager';
 import TokenWorkspaceSection from './token-workspace-section';
 import Workspace from './workspace';
@@ -18,7 +18,7 @@ export default function Page() {
       <EncodingRepair />
       <CopyPolish />
       <Workspace />
-      <ResourceCreationHub />
+      <BmTokenCreatorHub />
       <ResourceCenter />
       <BulkHealthCheck />
       <ProductionQueue />
