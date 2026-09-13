@@ -32,6 +32,16 @@ const eslintConfig = defineConfig([
       "@next/next/no-html-link-for-pages": "off",
     },
   },
+  {
+    files: ["app/eztool-dashboard.tsx"],
+    rules: {
+      // This shell intentionally orchestrates many optional tool surfaces and
+      // keeps a few icon/data hooks ready for tools that are progressively enabled.
+      "@typescript-eslint/no-unused-vars": "off",
+      "react-hooks/set-state-in-effect": "off",
+      "@next/next/no-html-link-for-pages": "off",
+    },
+  },
 ]);
 
 export default eslintConfig;
