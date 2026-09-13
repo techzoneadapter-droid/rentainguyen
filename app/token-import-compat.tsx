@@ -161,6 +161,51 @@ export default function TokenImportCompat() {
       if (confirmation) confirmation.style.display = 'none';
     };
 
+    const patchTokenCheckUi = (main: Element) => {
+      const table = main.querySelector('table');
+      if (table) {
+        for (const header of Array.from(table.querySelectorAll<HTMLTableCellElement>('th'))) {
+          const text = header.textContent?.trim();
+          if (text === 'Quyền chính') header.textContent = 'Quyền đang hoạt động';
+          if (text === 'Quét') header.textContent = 'Check gần nhất';
+        }
+
+        for (const button of Array.from(table.querySelectorAll<HTMLButtonElement>('button'))) {
+          if (button.textContent?.trim() === 'Check') {
+            button.textContent = 'Check token';
+            button.title = 'Kiểm tra token còn LIVE và đọc lại các permission đang được Meta trả về trạng thái granted.';
+          }
+        }
+      }
+
+      for (const button of Array.from(main.querySelectorAll<HTMLButtonElement>('button'))) {
+        const text = button.textContent?.trim() || '';
+        if (text.startsWith('Quét lại')) {
+          const count = text.replace(/^Quét lại\s*/, '').trim();
+          button.textContent = `Check token đã chọn${count ? ` ${count}` : ''}`;
+          button.title = 'Check lại token đã chọn: trạng thái LIVE/DIE, quyền granted và tài nguyên token đang truy cập được.';
+        }
+      }
+
+      const summaries = Array.from(main.querySelectorAll<HTMLElement>('div')).filter((node) => {
+        const directText = Array.from(node.childNodes)
+          .filter((child) => child.nodeType === Node.TEXT_NODE)
+          .map((child) => child.textContent || '')
+          .join(' ');
+        return directText.includes('Hiển thị') && node.querySelector('select');
+      });
+      const summary = summaries[0];
+      if (summary && !summary.querySelector('[data-token-check-help="1"]')) {
+        const help = document.createElement('span');
+        help.dataset.tokenCheckHelp = '1';
+        help.textContent = 'Check token: LIVE khi /me gọi được; “Quyền đang hoạt động” chỉ hiện permission Meta trả về granted.';
+        help.style.fontSize = '12px';
+        help.style.opacity = '0.72';
+        help.style.flexBasis = '100%';
+        summary.appendChild(help);
+      }
+    };
+
     const patchUi = () => {
       const main = document.querySelector('.bulk-token-main');
       if (!main) return;
@@ -170,6 +215,7 @@ export default function TokenImportCompat() {
         input.title = 'Chọn file token ở bất kỳ định dạng text phổ biến';
       }
       authorizeLocalUi(main);
+      patchTokenCheckUi(main);
       const help = Array.from(main.querySelectorAll<HTMLParagraphElement>('p')).find((p) => p.textContent?.includes('Hỗ trợ TXT/CSV'));
       if (help) help.textContent = 'Nhận TXT, CSV, TSV, JSON, LOG, LST và file text không có đuôi; tự nhận token đứng riêng, label|token, nhiều cột, key=value, JSON hoặc URL có access_token. Hỗ trợ UTF-8 và UTF-16.';
     };
