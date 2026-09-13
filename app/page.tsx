@@ -1,4 +1,5 @@
 import BulkHealthCheck from './bulk-health-check';
+import BulkTokenCenter from './bulk-token-center';
 import BmTokenCreatorHub from './bm-token-creator-hub';
 import CopyPolish from './copy-polish';
 import CrmResourcePush from './crm-resource-push';
@@ -18,6 +19,7 @@ export default function Page() {
       <EncodingRepair />
       <CopyPolish />
       <EztoolDashboard />
+      <BulkTokenCenter />
       <TokenWorkspaceSection />
       <BmTokenCreatorHub />
       <ResourceCenter />
