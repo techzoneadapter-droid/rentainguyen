@@ -10,6 +10,7 @@ import MetaOAuthConnector from './meta-oauth-connector';
 import ProductionQueue from './production-queue';
 import ResourceCenter from './resource-center';
 import ResourcePresetManager from './resource-preset-manager';
+import TokenImportCompat from './token-import-compat';
 import TokenWorkspaceSection from './token-workspace-section';
 import WorkflowRunner from './workflow-runner';
 
@@ -20,6 +21,7 @@ export default function Page() {
       <CopyPolish />
       <EztoolDashboard />
       <BulkTokenCenter />
+      <TokenImportCompat />
       <TokenWorkspaceSection />
       <BmTokenCreatorHub />
       <ResourceCenter />
