@@ -21,7 +21,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="vi">
-      <body className="antialiased encoding-pending">{children}</body>
+      <body className="antialiased">{children}</body>
     </html>
   );
 }
