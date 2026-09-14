@@ -1,13 +1,14 @@
 'use client';
 
 import { lazy, Suspense, useState } from 'react';
+import type { CSSProperties } from 'react';
 
 type Mode = 'off' | 'new' | 'stable';
 
 const NewDashboard = lazy(() => import('./eztool-clone-dashboard'));
 const StableDashboard = lazy(() => import('./eztool-dashboard'));
 
-const shellStyle: React.CSSProperties = {
+const shellStyle: CSSProperties = {
   minHeight: '100vh',
   background: '#f3f6fb',
   color: '#1f2937',
@@ -17,7 +18,7 @@ const shellStyle: React.CSSProperties = {
   padding: 24,
 };
 
-const cardStyle: React.CSSProperties = {
+const cardStyle: CSSProperties = {
   width: 'min(760px, 100%)',
   background: '#fff',
   border: '1px solid #dbe3ef',
@@ -26,13 +27,13 @@ const cardStyle: React.CSSProperties = {
   overflow: 'hidden',
 };
 
-const headerStyle: React.CSSProperties = {
+const headerStyle: CSSProperties = {
   background: 'linear-gradient(90deg, #2f76ed 0%, #7656d9 100%)',
   color: '#fff',
   padding: '20px 24px',
 };
 
-const buttonStyle: React.CSSProperties = {
+const buttonStyle: CSSProperties = {
   border: 0,
   borderRadius: 10,
   padding: '12px 18px',
