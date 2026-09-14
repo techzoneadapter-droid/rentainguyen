@@ -1,5 +1,5 @@
 import { demoAssets, types, type Asset } from '../../../lib/data';
-import { audit, config, db, graph, graphList, list, owner, put } from '../../../lib/server';
+import { audit, config, db, list, owner, put } from '../../../lib/server';
 import { requestSchema } from '../../../lib/validation';
 
 function isAssetType(value: unknown): value is string {
@@ -171,157 +171,23 @@ export async function POST(req: Request) {
       ]);
       message = 'Đã thêm dịch vụ';
     } else if (action === 'sync') {
-      const businesses = await graphList('me/businesses', 'id,name,verification_status');
-      const synced: Asset[] = [];
-
-      for (const business of businesses) {
-        const businessId = String(business.id);
-        synced.push({
-          id: `meta:${businessId}`,
-          name: String(business.name),
-          type: 'BM',
-          verified: business.verification_status === 'verified',
-          status: 'Truy cập được',
-          country: 'Chưa rõ',
-          tier: 'Chưa rõ',
-          limit: 'Chưa rõ',
-          parent: '',
-          source: 'meta',
-          checked: new Date().toISOString(),
-        });
-
-        const accounts = await graphList(
-          `${businessId}/owned_ad_accounts`,
-          'id,name,account_status,spend_cap,currency',
-        );
-        for (const account of accounts) {
-          const accountStatus = Number(account.account_status);
-          const spendCap = account.spend_cap;
-          const currency = String(account.currency || '');
-          synced.push({
-            id: `meta:${String(account.id)}`,
-            name: String(account.name),
-            type: 'TKQC',
-            status: accountStatus === 1 ? 'LIVE' : accountStatus === 2 ? 'DIE' : 'Hạn chế',
-            verified: false,
-            country: 'Chưa rõ',
-            tier: '—',
-            limit: spendCap && spendCap !== '0' ? `${String(spendCap)} ${currency} (đơn vị API)` : 'Chưa thiết lập',
-            currency,
-            metaStatus: accountStatus,
-            parent: `meta:${businessId}`,
-            source: 'meta',
-            checked: new Date().toISOString(),
-          });
-        }
-
-        for (const [edge, type] of [
-          ['owned_pages', 'Page'],
-          ['adspixels', 'Dataset/Pixel'],
-        ] as const) {
-          const data = await graphList(`${businessId}/${edge}`, 'id,name');
-          for (const item of data) {
-            synced.push({
-              id: `meta:${String(item.id)}`,
-              name: String(item.name),
-              type,
-              status: 'Truy cập được',
-              verified: false,
-              country: 'Chưa rõ',
-              tier: '—',
-              limit: '—',
-              parent: `meta:${businessId}`,
-              source: 'meta',
-              checked: new Date().toISOString(),
-            });
-          }
-        }
-      }
-
-      const previous = (await list(user, 'asset')) as Asset[];
-      await db().batch([
-        ...synced.map((asset) =>
-          put(user, 'asset', {
-            ...asset,
-            id: `${user}:${asset.id}`,
-            parent: asset.parent ? `${user}:${asset.parent}` : '',
-          }),
-        ),
-        ...previous
-          .filter(
-            (asset) =>
-              asset.source === 'meta' &&
-              !synced.some((next) => `${user}:${next.id}` === asset.id),
-          )
-          .map((asset) =>
-            put(user, 'asset', {
-              ...asset,
-              status: 'Cần kiểm tra quyền',
-              checked: new Date().toISOString(),
-            }),
-          ),
-        audit(user, `Đồng bộ ${synced.length} tài nguyên từ Meta`),
-      ]);
-      message = `Đã đồng bộ ${synced.length} tài nguyên`;
+      const assets = (await list(user, 'asset')) as Asset[];
+      await db().batch([audit(user, `Đồng bộ local ${assets.length} hồ sơ • không gọi Meta Graph`)]);
+      message = `Đã đọc ${assets.length} hồ sơ trong workspace. Không gọi Graph API.`;
     } else if (action === 'health') {
       const assets = (await list(user, 'asset')) as Asset[];
-      const chosen = assets.filter(
-        (asset) => !body.ids?.length || body.ids.includes(asset.id),
-      );
+      const chosen = assets.filter((asset) => !body.ids?.length || body.ids.includes(asset.id));
       if (!chosen.length) throw new Error('Chưa có tài nguyên để kiểm tra.');
-
-      const results: Asset[] = [];
-      for (const asset of chosen) {
-        if (asset.source !== 'meta') {
-          results.push({
-            ...asset,
-            checked: new Date().toISOString(),
-            healthNote:
-              asset.source === 'demo'
-                ? 'Dữ liệu mẫu, không kiểm tra Meta'
-                : 'Cần liên kết ID Meta trước khi kiểm tra',
-          });
-          continue;
-        }
-
-        try {
-          const id = asset.id.split('meta:')[1];
-          if (!id) throw new Error('ID Meta không hợp lệ.');
-          const result = await graph(id, {
-            fields: asset.type === 'TKQC' ? 'id,account_status' : 'id',
-          });
-          const accountStatus = Number(result.account_status);
-          results.push({
-            ...asset,
-            checked: new Date().toISOString(),
-            status:
-              asset.type === 'TKQC'
-                ? accountStatus === 1
-                  ? 'LIVE'
-                  : accountStatus === 2
-                    ? 'DIE'
-                    : 'Hạn chế'
-                : 'Truy cập được',
-            healthNote: 'Đã đọc từ Meta',
-          });
-        } catch (error) {
-          results.push({
-            ...asset,
-            checked: new Date().toISOString(),
-            status: 'Không xác định',
-            healthNote: (error as Error).message,
-          });
-        }
-      }
-
+      const results = chosen.map((asset) => ({
+        ...asset,
+        checked: new Date().toISOString(),
+        healthNote: 'Kiểm tra local: không gọi Graph API từ workspace token chung.',
+      }));
       await db().batch([
         ...results.map((asset) => put(user, 'asset', asset)),
-        audit(
-          user,
-          `Kiểm tra ${results.length} hồ sơ; ${chosen.filter((asset) => asset.source === 'meta').length} tài nguyên Meta`,
-        ),
+        audit(user, `Health local ${results.length} hồ sơ • không gọi Graph`),
       ]);
-      message = 'Đã cập nhật kết quả kiểm tra';
+      message = 'Đã cập nhật ghi chú kiểm tra local. Không gọi Graph API.';
     } else {
       throw new Error('Thao tác không được hỗ trợ.');
     }
