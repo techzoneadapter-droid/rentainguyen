@@ -3,6 +3,7 @@ import { owner } from '../../../lib/server';
 import {
   classifyMetaTokenError,
   getMetaTokenSecret,
+  graphPostWithToken,
   graphWithToken,
   updateMetaToken,
 } from '../../../lib/meta-tokens';
@@ -12,11 +13,23 @@ const querySchema = z.object({
   accountId: z.string().regex(/^\d{5,30}$/),
 });
 
+const mutationSchema = z.object({
+  tokenId: z.string().uuid(),
+  accountId: z.string().regex(/^\d{5,30}$/),
+  campaignId: z.string().regex(/^\d{5,30}$/),
+  status: z.enum(['ACTIVE', 'PAUSED']),
+});
+
 type MetaObject = Record<string, unknown>;
 type GraphList = MetaObject & {
   data?: unknown[];
   paging?: { cursors?: { after?: string } };
 };
+
+function sameOrigin(req: Request) {
+  const origin = req.headers.get('origin');
+  return !origin || origin === new URL(req.url).origin;
+}
 
 function objectValue(value: unknown): MetaObject {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as MetaObject : {};
@@ -95,6 +108,62 @@ export async function GET(req: Request) {
   } catch (error) {
     if (error instanceof z.ZodError) {
       return Response.json({ error: 'Token hoặc ID tài khoản quảng cáo không hợp lệ.' }, { status: 400 });
+    }
+    return Response.json({ error: (error as Error).message }, { status: 400 });
+  }
+}
+
+export async function POST(req: Request) {
+  if (!sameOrigin(req)) {
+    return Response.json({ error: 'Nguồn yêu cầu không hợp lệ.' }, { status: 403 });
+  }
+
+  try {
+    const workspaceOwner = await owner();
+    const input = mutationSchema.parse(await req.json());
+    const source = await getMetaTokenSecret(workspaceOwner, input.tokenId);
+    const now = new Date().toISOString();
+
+    try {
+      const campaign = await graphWithToken(source.token, input.campaignId, {
+        fields: 'id,name,account_id,status',
+      }) as MetaObject;
+      const campaignAccountId = text(campaign.account_id).replace(/^act_/, '');
+      if (campaignAccountId !== input.accountId) {
+        return Response.json({ error: 'Campaign không thuộc TKQC đã chọn.' }, { status: 400 });
+      }
+
+      await graphPostWithToken(source.token, input.campaignId, { status: input.status });
+      await updateMetaToken(workspaceOwner, source.record, {
+        status: 'active',
+        lastCheckedAt: now,
+        lastUsedAt: now,
+        lastError: undefined,
+        lastErrorCode: undefined,
+        lastErrorSubcode: undefined,
+      });
+
+      return Response.json({
+        ok: true,
+        campaignId: input.campaignId,
+        status: input.status,
+        message: `Đã ${input.status === 'ACTIVE' ? 'bật' : 'tạm dừng'} campaign ${text(campaign.name) || input.campaignId}.`,
+      });
+    } catch (error) {
+      const classified = classifyMetaTokenError(error);
+      await updateMetaToken(workspaceOwner, source.record, {
+        status: classified.status === 'unknown_error' ? source.record.status : classified.status,
+        lastCheckedAt: now,
+        lastUsedAt: now,
+        lastError: classified.reason,
+        lastErrorCode: classified.code,
+        lastErrorSubcode: classified.subcode,
+      });
+      return Response.json({ error: classified.reason, tokenStatus: classified.status }, { status: 400 });
+    }
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return Response.json({ error: 'Token, TKQC, campaign hoặc trạng thái không hợp lệ.' }, { status: 400 });
     }
     return Response.json({ error: (error as Error).message }, { status: 400 });
   }
