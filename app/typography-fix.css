@@ -6,10 +6,9 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
-body.encoding-pending {
-  visibility: hidden;
-}
-
+/* Never hide the whole document during startup. A client-runtime failure must
+   leave the server-rendered launcher visible instead of producing a blank page. */
+body.encoding-pending,
 body.encoding-ready {
   visibility: visible;
 }
