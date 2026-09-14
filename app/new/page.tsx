@@ -1,5 +1,5 @@
-import ResourceConsoleV3 from '../resource-console-v3';
+import ResourceConsoleV4 from '../resource-console-v4';
 
 export default function NewDashboardPage() {
-  return <ResourceConsoleV3 />;
+  return <ResourceConsoleV4 />;
 }
