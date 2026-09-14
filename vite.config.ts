@@ -53,6 +53,12 @@ export default defineConfig(async ({ mode }) => {
   const { cloudflare } = await import("@cloudflare/vite-plugin");
 
   return {
+    // Vinext beta + Vite can otherwise pre-bundle this RSC/client shim in one
+    // environment and leave it unbundled in another. On Windows dev this can
+    // result in a fully blank page even though API requests still return 200.
+    optimizeDeps: {
+      exclude: ["vinext/dist/shims/internal/app-prefetch-fetch-queue.js"],
+    },
     server: isCodexSeatbeltSandbox
       ? { watch: { useFsEvents: false, usePolling: true } }
       : undefined,
