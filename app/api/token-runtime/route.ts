@@ -1,11 +1,13 @@
 import { z } from 'zod';
-import { audit, db, list, owner, put } from '../../../lib/server';
+import type { Asset } from '../../../lib/data';
+import { audit, config, db, list, owner, put } from '../../../lib/server';
 import {
   classifyMetaTokenError,
   encryptToken,
   getMetaTokenSecret,
   getMetaTokens,
   graphWithToken,
+  MetaTokenError,
   publicToken,
   tokenFingerprint,
   type MetaTokenRecord,
@@ -53,7 +55,19 @@ const scanSchema = z.object({
   ids: z.array(z.string().uuid()).min(1).max(20),
 });
 
-const requestSchema = z.union([importSchema, scanSchema]);
+const renameSchema = z.object({
+  action: z.literal('rename'),
+  id: z.string().uuid(),
+  label: z.string().trim().min(1).max(80),
+});
+
+const deleteSchema = z.object({
+  action: z.literal('delete'),
+  ids: z.array(z.string().uuid()).min(1).max(100),
+  purgeAssets: z.boolean().default(true),
+});
+
+const requestSchema = z.discriminatedUnion('action', [importSchema, scanSchema, renameSchema, deleteSchema]);
 
 function sameOrigin(req: Request) {
   const origin = req.headers.get('origin');
@@ -72,30 +86,90 @@ function inventoryId(workspaceOwner: string, tokenId: string) {
   return `${workspaceOwner}:token-inventory:${tokenId}`;
 }
 
+function cleanToken(value: string) {
+  return String(value || '')
+    .replace(/^\s*Bearer\s+/i, '')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .replace(/^['"]|['"]$/g, '')
+    .replace(/\s+/g, '')
+    .trim();
+}
+
+function deleteRecord(workspaceOwner: string, kind: string, id: string) {
+  return db().prepare('DELETE FROM records WHERE owner = ? AND kind = ? AND id = ?').bind(workspaceOwner, kind, id);
+}
+
 async function wait(ms: number) {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function makeLooseMetaError(response: Response, body: MetaObject) {
+  const error = objectValue(body.error);
+  const code = Number(error.code || response.status || 0);
+  const subcode = Number(error.error_subcode || 0) || undefined;
+  const message = [text(error.error_user_title), text(error.error_user_msg), text(error.message)]
+    .filter(Boolean)
+    .filter((value, index, array) => array.indexOf(value) === index)
+    .join(' — ') || 'Meta không trả về dữ liệu hợp lệ.';
+  const suffix = subcode ? `/${subcode}` : '';
+  return new MetaTokenError(`Meta ${code}${suffix}: ${message}`, { code, subcode, httpStatus: response.status });
+}
+
+async function graphWithTokenAsQueryParam(token: string, path: string, params: Record<string, string> = {}) {
+  const url = new URL(`https://graph.facebook.com/${config().version}/${path}`);
+  for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
+  url.searchParams.set('access_token', token);
+  const response = await fetch(url, { signal: AbortSignal.timeout(25000) });
+  const body = await response.json().catch(() => ({})) as MetaObject;
+  if (!response.ok || body.error) throw makeLooseMetaError(response, body);
+  return body;
+}
+
+async function probeDebugToken(token: string) {
+  const debug = await graphWithTokenAsQueryParam(token, 'debug_token', { input_token: token }) as MetaObject;
+  const data = objectValue(debug.data);
+  if (data.is_valid === true) {
+    const userId = text(data.user_id);
+    const appId = text(data.app_id);
+    return {
+      id: userId || appId || 'debug-token-valid',
+      name: userId ? `Meta User ${userId}` : `Meta App ${appId || 'token'}`,
+      debugOnly: true,
+    } as MetaObject;
+  }
+  throw new MetaTokenError('Meta debug_token trả về is_valid=false.', { code: 190, httpStatus: 400 });
+}
+
 async function probeMe(token: string) {
+  const cleaned = cleanToken(token);
   let lastError: unknown;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      return await graphWithToken(token, 'me', { fields: 'id,name' }) as MetaObject;
+      return await graphWithToken(cleaned, 'me', { fields: 'id,name' }) as MetaObject;
     } catch (error) {
       lastError = error;
-      const classified = classifyMetaTokenError(error);
-      if (classified.status !== 'unknown_error' && classified.status !== 'rate_limited') throw error;
+      try {
+        return await graphWithTokenAsQueryParam(cleaned, 'me', { fields: 'id,name' });
+      } catch (fallbackError) {
+        lastError = fallbackError;
+      }
+      const classified = classifyMetaTokenError(lastError);
+      if (classified.status !== 'unknown_error' && classified.status !== 'rate_limited' && classified.status !== 'permission_issue') throw lastError;
       if (attempt === 0) await wait(350);
     }
   }
-  throw lastError;
+  try {
+    return await probeDebugToken(cleaned);
+  } catch {
+    throw lastError;
+  }
 }
 
 async function graphListWithToken(token: string, path: string, fields: string) {
   const rows: MetaObject[] = [];
   let after = '';
   for (let page = 0; page < 12; page += 1) {
-    const response = await graphWithToken(token, path, {
+    const response = await graphWithToken(cleanToken(token), path, {
       fields,
       limit: '100',
       ...(after ? { after } : {}),
@@ -149,12 +223,18 @@ function uniqueIds(rows: MetaObject[], normalize = (value: string) => value) {
   );
 }
 
-async function scanToken(workspaceOwner: string, record: MetaTokenRecord, token: string) {
+async function scanToken(workspaceOwner: string, record: MetaTokenRecord, rawToken: string) {
   const now = new Date().toISOString();
+  const token = cleanToken(rawToken);
   const warnings: string[] = [];
+  if (!token || token.length < 20) {
+    throw new MetaTokenError('Token trống hoặc quá ngắn sau khi làm sạch ký tự xuống dòng/khoảng trắng.', { code: 400, httpStatus: 400 });
+  }
   try {
     const me = await probeMe(token);
-    const [permissions, businesses, directPages, directAds] = await Promise.all([
+    if (me.debugOnly) warnings.push('Token chỉ xác minh được bằng debug_token; /me không đọc được trong app/API context hiện tại. Một số thao tác tài nguyên có thể không chạy cho đến khi dùng Graph API user token phù hợp.');
+
+    const [permissions, businesses, directPages, directAds] = me.debugOnly ? [[], [], [], []] : await Promise.all([
       readPermissions(token, warnings),
       safeList(token, 'me/businesses', 'id,name,verification_status', warnings),
       safeList(token, 'me/accounts', 'id,name,tasks', warnings),
@@ -209,6 +289,8 @@ async function scanToken(workspaceOwner: string, record: MetaTokenRecord, token:
       put(workspaceOwner, 'token-inventory', inventory),
       put(workspaceOwner, 'meta-token', {
         ...record,
+        encrypted: await encryptToken(token),
+        fingerprint: await tokenFingerprint(token),
         status: 'active',
         metaUserId: inventory.metaUserId || record.metaUserId,
         metaUserName: inventory.metaUserName || record.metaUserName,
@@ -245,6 +327,8 @@ async function scanToken(workspaceOwner: string, record: MetaTokenRecord, token:
       put(workspaceOwner, 'token-inventory', inventory),
       put(workspaceOwner, 'meta-token', {
         ...record,
+        encrypted: await encryptToken(token),
+        fingerprint: await tokenFingerprint(token),
         status: classified.status,
         lastCheckedAt: now,
         lastError: classified.reason,
@@ -282,6 +366,33 @@ export async function POST(req: Request) {
     const input = requestSchema.parse(await req.json());
     const inventories: TokenInventory[] = [];
 
+    if (input.action === 'rename') {
+      const records = await getMetaTokens(workspaceOwner);
+      const record = records.find((item) => item.id === input.id);
+      if (!record) throw new Error('Không tìm thấy token để sửa tên.');
+      await put(workspaceOwner, 'meta-token', { ...record, label: input.label, updated: new Date().toISOString() }).run();
+      await audit(workspaceOwner, `Sửa tên token: ${record.label} → ${input.label}`).run();
+      return Response.json({ ok: true, tokens: await joinedRows(workspaceOwner), message: 'Đã sửa tên token.' });
+    }
+
+    if (input.action === 'delete') {
+      const ids = new Set(input.ids);
+      const deletes = input.ids.flatMap((id) => [
+        deleteRecord(workspaceOwner, 'meta-token', id),
+        deleteRecord(workspaceOwner, 'token-inventory', inventoryId(workspaceOwner, id)),
+      ]);
+      let purgedAssets = 0;
+      if (input.purgeAssets) {
+        const assets = await list(workspaceOwner, 'asset') as Asset[];
+        const linked = assets.filter((asset) => ids.has(String(asset.sourceTokenId || '')));
+        purgedAssets = linked.length;
+        deletes.push(...linked.map((asset) => deleteRecord(workspaceOwner, 'asset', asset.id)));
+      }
+      for (let index = 0; index < deletes.length; index += 50) await db().batch(deletes.slice(index, index + 50));
+      await audit(workspaceOwner, `Xóa ${input.ids.length} token${purgedAssets ? ` và ${purgedAssets} tài nguyên liên quan` : ''}`).run();
+      return Response.json({ ok: true, deleted: input.ids.length, purgedAssets, tokens: await joinedRows(workspaceOwner), message: `Đã xóa ${input.ids.length} token.` });
+    }
+
     if (input.action === 'import') {
       const existing = await getMetaTokens(workspaceOwner);
       const byFingerprint = new Map(existing.map((record) => [record.fingerprint, record] as const));
@@ -289,14 +400,15 @@ export async function POST(req: Request) {
       let reused = 0;
 
       for (const item of input.items) {
-        const fingerprint = await tokenFingerprint(item.token);
+        const token = cleanToken(item.token);
+        const fingerprint = await tokenFingerprint(token);
         let record = byFingerprint.get(fingerprint);
         if (!record) {
           const now = new Date().toISOString();
           record = {
             id: crypto.randomUUID(),
             label: item.label || `Token ${existing.length + imported + 1}`,
-            encrypted: await encryptToken(item.token),
+            encrypted: await encryptToken(token),
             fingerprint,
             status: 'unknown_error',
             created: now,
@@ -307,7 +419,8 @@ export async function POST(req: Request) {
           record = {
             ...record,
             label: item.label || record.label,
-            encrypted: await encryptToken(item.token),
+            encrypted: await encryptToken(token),
+            fingerprint,
             lastError: undefined,
             lastErrorCode: undefined,
             lastErrorSubcode: undefined,
@@ -317,7 +430,7 @@ export async function POST(req: Request) {
         }
         await put(workspaceOwner, 'meta-token', record).run();
         byFingerprint.set(fingerprint, record);
-        inventories.push(await scanToken(workspaceOwner, record, item.token));
+        inventories.push(await scanToken(workspaceOwner, record, token));
       }
 
       await audit(workspaceOwner, `Nạp/check token: mới ${imported}, dùng lại ${reused}`).run();
@@ -350,7 +463,7 @@ export async function POST(req: Request) {
     await audit(workspaceOwner, `Check lại ${input.ids.length} token`).run();
     return Response.json({ processed: input.ids.length, inventories, tokens: await joinedRows(workspaceOwner) });
   } catch (error) {
-    if (error instanceof z.ZodError) return Response.json({ error: 'Dữ liệu token không hợp lệ. Mỗi lượt tối đa 20 token.' }, { status: 400 });
+    if (error instanceof z.ZodError) return Response.json({ error: 'Dữ liệu token không hợp lệ. Mỗi lượt tối đa 20 token khi nạp/check; xóa tối đa 100 token.' }, { status: 400 });
     return Response.json({ error: (error as Error).message }, { status: 400 });
   }
 }
