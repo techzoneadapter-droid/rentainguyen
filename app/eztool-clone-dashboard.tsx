@@ -2,557 +2,105 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  AlertTriangle,
-  AppWindow,
-  BadgeCheck,
-  Ban,
-  Bell,
-  Boxes,
-  Building2,
-  CalendarDays,
-  CheckCircle2,
-  ChevronLeft,
-  ChevronRight,
-  CircleHelp,
-  Columns3,
-  Copy,
-  CreditCard,
-  Database,
-  FileText,
-  Filter,
-  Flag,
-  FolderKanban,
-  Grid2X2,
-  Image as ImageIcon,
-  KeyRound,
-  Layers3,
-  Link2,
-  ListFilter,
-  LoaderCircle,
-  LockKeyhole,
-  LogOut,
-  MapPinCheck,
-  Megaphone,
-  Moon,
-  PackageOpen,
-  Play,
-  Plus,
-  ReceiptText,
-  RefreshCw,
-  Rocket,
-  Search,
-  Settings,
-  ShieldCheck,
-  SlidersHorizontal,
-  Trash2,
-  Upload,
-  UserPlus,
-  Users,
-  WalletCards,
-  WandSparkles,
-  Workflow,
-  X,
-  Zap,
+  AlertTriangle, AppWindow, BadgeCheck, Ban, Bell, Boxes, Building2, CalendarDays, CheckCircle2,
+  ChevronLeft, ChevronRight, CircleHelp, Columns3, Copy, CreditCard, Database, FileText, Filter, Flag,
+  FolderKanban, Grid2X2, Image as ImageIcon, KeyRound, Layers3, Link2, ListFilter, LoaderCircle,
+  LockKeyhole, LogOut, MapPinCheck, Megaphone, Moon, PackageOpen, Play, Plus, ReceiptText, RefreshCw,
+  Rocket, Search, Settings, ShieldCheck, SlidersHorizontal, Trash2, Upload, UserPlus, Users, WalletCards,
+  WandSparkles, Workflow, X, Zap,
 } from 'lucide-react';
-import type { Asset, Entry } from '../lib/data';
+import type { Asset } from '../lib/data';
 import styles from './eztool-clone.module.css';
 
 type TokenStatus = 'active' | 'invalid' | 'permission_issue' | 'rate_limited' | 'create_restricted' | 'unknown_error';
-type Inventory = {
-  tokenId: string;
-  status: TokenStatus;
-  metaUserId?: string;
-  metaUserName?: string;
-  permissions: string[];
-  businessCount: number;
-  verifiedBusinessCount: number;
-  pageCount: number;
-  adAccountCount: number;
-  liveAdCount: number;
-  dieAdCount: number;
-  restrictedAdCount: number;
-  totalResources: number;
-  warnings: string[];
-  lastError?: string;
-  scannedAt: string;
-};
-type TokenRow = {
-  id: string;
-  label: string;
-  fingerprint: string;
-  status: TokenStatus;
-  metaUserId?: string;
-  metaUserName?: string;
-  lastError?: string;
-  inventory: Inventory | null;
-};
-type WorkspaceResponse = { assets?: Asset[]; logs?: Entry[]; error?: string };
-type View =
-  | 'home' | 'ads' | 'pixels' | 'campaigns' | 'bm' | 'bm-check' | 'bm-sync' | 'bm-links'
-  | 'pages' | 'page-messages' | 'page-uid' | 'groups' | 'group-users' | 'group-members' | 'group-find'
-  | 'content-groups' | 'content-pages' | 'content-group-posts' | 'content-page-posts' | 'content-library' | 'content-reply'
-  | 'tokens' | 'create-bm' | 'resources' | 'queue' | 'preset' | 'guides' | 'oauth' | 'crm' | 'workflow'
-  | 'uid' | 'text' | 'logs' | 'settings';
-type TopGroup = 'home' | 'ads' | 'bm' | 'page' | 'group';
-type ImportItem = { label?: string; token: string };
-type PageOption = { id: string; name: string; tasks?: string[] };
-type BusinessOption = { id: string; name: string; verificationStatus: string };
-type AdAccountOption = { id: string; name: string; accountStatus: number; currency?: string; spendCap?: string };
+type Inventory = { tokenId:string; status:TokenStatus; permissions:string[]; businessCount:number; verifiedBusinessCount:number; pageCount:number; adAccountCount:number; liveAdCount:number; dieAdCount:number; restrictedAdCount:number; totalResources:number; scannedAt:string; metaUserName?:string; lastError?:string };
+type TokenRow = { id:string; label:string; fingerprint:string; status:TokenStatus; metaUserName?:string; inventory:Inventory|null };
+type View = 'home'|'ads'|'pixels'|'campaigns'|'bm'|'bm-check'|'bm-sync'|'bm-links'|'pages'|'page-messages'|'page-uid'|'groups'|'group-users'|'group-members'|'group-find'|'content-groups'|'content-pages'|'content-group-posts'|'content-page-posts'|'content-library'|'content-reply'|'tokens'|'resources'|'queue'|'preset'|'guides'|'oauth'|'crm'|'workflow'|'uid'|'text'|'settings';
+type TopGroup = 'home'|'ads'|'bm'|'page'|'group';
+type ImportItem = { label?:string; token:string };
+type PageOption = { id:string; name:string };
+type BusinessOption = { id:string; name:string; verificationStatus:string };
 
-const statusText: Record<TokenStatus, string> = {
-  active: 'LIVE', invalid: 'DIE', permission_issue: 'Thiếu quyền', rate_limited: 'Rate limit', create_restricted: 'Giới hạn tạo', unknown_error: 'Chưa rõ',
+const statusText:Record<TokenStatus,string> = { active:'LIVE', invalid:'DIE', permission_issue:'Thiếu quyền', rate_limited:'Rate limit', create_restricted:'Giới hạn tạo', unknown_error:'Chưa rõ' };
+const topTabs:Array<{key:TopGroup;label:string;view:View}> = [
+  {key:'home',label:'HOME',view:'home'},{key:'ads',label:'ADS',view:'ads'},{key:'bm',label:'BM',view:'bm'},{key:'page',label:'PAGE',view:'pages'},{key:'group',label:'GROUP',view:'groups'},
+];
+const sideByGroup:Record<TopGroup,Array<{section?:string;key:View;label:string;icon:typeof Grid2X2}>> = {
+  home:[{key:'home',label:'Tất cả ứng dụng',icon:Grid2X2},{section:'NỔI BẬT',key:'ads',label:'Quản lý TKQC',icon:CreditCard},{key:'pixels',label:'Quản lý Pixel',icon:Layers3},{key:'campaigns',label:'Quản lý Camp',icon:Megaphone},{key:'bm',label:'Quản lý BM',icon:Building2},{key:'pages',label:'Quản lý Page',icon:Flag},{key:'groups',label:'Quản lý Group',icon:Users},{section:'CÔNG CỤ RIÊNG',key:'tokens',label:'Phân loại token',icon:KeyRound},{key:'resources',label:'Trung tâm tài nguyên',icon:Database},{key:'workflow',label:'Workflow',icon:Workflow}],
+  ads:[{key:'ads',label:'Quản lý TKQC',icon:CreditCard},{key:'pixels',label:'Quản lý Pixel',icon:Layers3},{key:'campaigns',label:'Quản lý Camp',icon:Megaphone},{section:'KHÁC',key:'tokens',label:'Phân loại token',icon:KeyRound},{key:'resources',label:'Tài nguyên',icon:Database},{key:'settings',label:'Cài đặt',icon:Settings}],
+  bm:[{key:'bm',label:'Quản lý BM',icon:Building2},{key:'bm-check',label:'Check BM',icon:ShieldCheck},{key:'bm-sync',label:'Đồng bộ BM',icon:RefreshCw},{key:'bm-links',label:'Quản lý link BM',icon:Link2},{section:'CÔNG CỤ RIÊNG',key:'tokens',label:'Phân loại token',icon:KeyRound},{key:'settings',label:'Cài đặt',icon:Settings}],
+  page:[{key:'pages',label:'Quản lý Page',icon:Flag},{key:'page-messages',label:'Quản lý tin nhắn',icon:FileText},{key:'page-uid',label:'Quét UID tương tác',icon:Search},{section:'CONTENT',key:'content-pages',label:'Đăng bài trang',icon:Rocket},{key:'content-page-posts',label:'Quản lý bài trang',icon:FileText},{key:'content-library',label:'Thư viện nội dung',icon:FolderKanban},{key:'content-reply',label:'Trả lời tự động',icon:WandSparkles}],
+  group:[{key:'groups',label:'Quản lý Group',icon:Users},{key:'group-users',label:'Quét nhóm người dùng',icon:Search},{key:'group-members',label:'Quét thành viên nhóm',icon:Users},{key:'group-find',label:'Tìm & Tham gia nhóm',icon:Plus},{section:'CONTENT',key:'content-groups',label:'Đăng bài nhóm',icon:Rocket},{key:'content-group-posts',label:'Quản lý bài nhóm',icon:FileText}],
 };
-
-const topTabs: Array<{ key: TopGroup; label: string; view: View }> = [
-  { key: 'home', label: 'HOME', view: 'home' },
-  { key: 'ads', label: 'ADS', view: 'ads' },
-  { key: 'bm', label: 'BM', view: 'bm' },
-  { key: 'page', label: 'PAGE', view: 'pages' },
-  { key: 'group', label: 'GROUP', view: 'groups' },
+const appCards:Array<{view:View;title:string;description:string;icon:typeof Grid2X2}> = [
+  {view:'ads',title:'Quản lý TKQC',description:'Theo dõi trạng thái và thao tác nhanh theo từng tài khoản quảng cáo.',icon:CreditCard},
+  {view:'pixels',title:'Quản lý Pixel',description:'Theo dõi Pixel/Dataset và Business Manager liên quan.',icon:Layers3},
+  {view:'campaigns',title:'Quản lý Camp',description:'Đọc chiến dịch và trạng thái phân phối theo TKQC.',icon:Megaphone},
+  {view:'bm',title:'Quản lý BM',description:'Quản lý Business Manager và tài nguyên liên quan.',icon:Building2},
+  {view:'pages',title:'Quản lý Page',description:'Theo dõi Fanpage và tài nguyên Page đang có quyền.',icon:Flag},
+  {view:'groups',title:'Quản lý Group',description:'Khung quản lý Group và các thao tác được API hỗ trợ.',icon:Users},
+  {view:'tokens',title:'Phân loại token',description:'Import, check LIVE/DIE và thống kê toàn bộ tài nguyên token.',icon:KeyRound},
+  {view:'uid',title:'Tra cứu UID',description:'Trích UID số từ chuỗi hoặc đường dẫn đã có ID.',icon:Search},
+  {view:'text',title:'Xử lý Text',description:'Làm sạch, lọc trùng, sắp xếp và chuẩn hóa danh sách.',icon:WandSparkles},
+  {view:'queue',title:'Hàng đợi',description:'Giữ luồng hàng đợi đã có trong app.',icon:ListFilter},
+  {view:'workflow',title:'Workflow',description:'Giữ luồng workflow hiện có cho workspace.',icon:Workflow},
+  {view:'resources',title:'Tài nguyên',description:'Tổng hợp BM, TKQC, Page và Pixel.',icon:Database},
 ];
 
-const sideByGroup: Record<TopGroup, Array<{ section?: string; key: View; label: string; icon: typeof Grid2X2 }>> = {
-  home: [
-    { key: 'home', label: 'Tất cả ứng dụng', icon: Grid2X2 },
-    { section: 'NỔI BẬT', key: 'ads', label: 'Quản lý TKQC', icon: CreditCard },
-    { key: 'pixels', label: 'Quản lý Pixel', icon: Layers3 },
-    { key: 'campaigns', label: 'Quản lý Camp', icon: Megaphone },
-    { key: 'bm', label: 'Quản lý BM', icon: Building2 },
-    { key: 'pages', label: 'Quản lý Page', icon: Flag },
-    { key: 'groups', label: 'Quản lý Group', icon: Users },
-    { section: 'CÔNG CỤ RIÊNG', key: 'tokens', label: 'Phân loại token', icon: KeyRound },
-    { key: 'create-bm', label: 'Tạo BM từ token', icon: Plus },
-    { key: 'resources', label: 'Trung tâm tài nguyên', icon: Database },
-    { key: 'workflow', label: 'Workflow', icon: Workflow },
-  ],
-  ads: [
-    { key: 'ads', label: 'Quản lý TKQC', icon: CreditCard },
-    { key: 'pixels', label: 'Quản lý Pixel', icon: Layers3 },
-    { key: 'campaigns', label: 'Quản lý Camp', icon: Megaphone },
-    { section: 'KHÁC', key: 'tokens', label: 'Phân loại token', icon: KeyRound },
-    { key: 'resources', label: 'Tài nguyên', icon: Database },
-    { key: 'settings', label: 'Cài đặt', icon: Settings },
-  ],
-  bm: [
-    { key: 'bm', label: 'Quản lý BM', icon: Building2 },
-    { key: 'bm-check', label: 'Check BM', icon: ShieldCheck },
-    { key: 'bm-sync', label: 'Đồng bộ BM', icon: RefreshCw },
-    { key: 'bm-links', label: 'Quản lý link BM', icon: Link2 },
-    { section: 'CÔNG CỤ RIÊNG', key: 'create-bm', label: 'Tạo BM từ token', icon: Plus },
-    { key: 'tokens', label: 'Phân loại token', icon: KeyRound },
-    { key: 'settings', label: 'Cài đặt', icon: Settings },
-  ],
-  page: [
-    { key: 'pages', label: 'Quản lý Page', icon: Flag },
-    { key: 'page-messages', label: 'Quản lý tin nhắn', icon: FileText },
-    { key: 'page-uid', label: 'Quét UID tương tác', icon: Search },
-    { section: 'CONTENT', key: 'content-pages', label: 'Đăng bài trang', icon: Rocket },
-    { key: 'content-page-posts', label: 'Quản lý bài trang', icon: FileText },
-    { key: 'content-library', label: 'Thư viện nội dung', icon: FolderKanban },
-    { key: 'content-reply', label: 'Trả lời tự động', icon: WandSparkles },
-  ],
-  group: [
-    { key: 'groups', label: 'Quản lý Group', icon: Users },
-    { key: 'group-users', label: 'Quét nhóm người dùng', icon: Search },
-    { key: 'group-members', label: 'Quét thành viên nhóm', icon: Users },
-    { key: 'group-find', label: 'Tìm & Tham gia nhóm', icon: Plus },
-    { section: 'CONTENT', key: 'content-groups', label: 'Đăng bài nhóm', icon: Rocket },
-    { key: 'content-group-posts', label: 'Quản lý bài nhóm', icon: FileText },
-  ],
-};
-
-const appCards: Array<{ view: View; title: string; description: string; icon: typeof Grid2X2 }> = [
-  { view: 'ads', title: 'Quản lý TKQC', description: 'Theo dõi trạng thái và thao tác nhanh theo từng tài khoản quảng cáo.', icon: CreditCard },
-  { view: 'pixels', title: 'Quản lý Pixel', description: 'Theo dõi Pixel/Dataset và Business Manager liên quan.', icon: Layers3 },
-  { view: 'campaigns', title: 'Quản lý Camp', description: 'Đọc chiến dịch và trạng thái phân phối theo TKQC.', icon: Megaphone },
-  { view: 'bm', title: 'Quản lý BM', description: 'Quản lý Business Manager và tài nguyên liên quan.', icon: Building2 },
-  { view: 'pages', title: 'Quản lý Page', description: 'Theo dõi Fanpage và tài nguyên Page đang có quyền.', icon: Flag },
-  { view: 'groups', title: 'Quản lý Group', description: 'Khung quản lý Group và các thao tác được API hỗ trợ.', icon: Users },
-  { view: 'tokens', title: 'Phân loại token', description: 'Import, check LIVE/DIE và thống kê toàn bộ tài nguyên token.', icon: KeyRound },
-  { view: 'create-bm', title: 'Tạo BM từ token', description: 'Tạo Business Manager bằng token bạn tự cấp.', icon: Plus },
-  { view: 'uid', title: 'Tra cứu UID', description: 'Trích UID số từ chuỗi hoặc đường dẫn đã có ID.', icon: Search },
-  { view: 'text', title: 'Xử lý Text', description: 'Làm sạch, lọc trùng, sắp xếp và chuẩn hóa danh sách.', icon: WandSparkles },
-  { view: 'queue', title: 'Hàng đợi', description: 'Giữ luồng hàng đợi đã có trong app.', icon: ListFilter },
-  { view: 'workflow', title: 'Workflow', description: 'Giữ luồng workflow hiện có cho workspace.', icon: Workflow },
-];
-
-function metaId(asset: Asset) {
-  if (asset.metaId) return asset.metaId;
-  const match = asset.id.match(/meta:(\d{5,30})$/);
-  return match?.[1] || asset.id;
+function metaId(asset:Asset){ if(asset.metaId)return asset.metaId; return asset.id.match(/meta:(\d{5,30})$/)?.[1]||asset.id; }
+function groupForView(view:View):TopGroup{ if(['ads','pixels','campaigns'].includes(view))return'ads'; if(['bm','bm-check','bm-sync','bm-links'].includes(view))return'bm'; if(['pages','page-messages','page-uid','content-pages','content-page-posts','content-library','content-reply'].includes(view))return'page'; if(['groups','group-users','group-members','group-find','content-groups','content-group-posts'].includes(view))return'group'; return'home'; }
+function decodeFile(buffer:ArrayBuffer){ const bytes=new Uint8Array(buffer); if(bytes[0]===0xff&&bytes[1]===0xfe)return new TextDecoder('utf-16le').decode(buffer); return new TextDecoder('utf-8').decode(buffer); }
+function parseTokens(input:string){
+  const out:ImportItem[]=[]; const seen=new Set<string>();
+  const push=(raw:unknown,label?:unknown)=>{const token=String(raw??'').trim().replace(/^['"]|['"]$/g,'');if(token.length<20||token.length>4096||/\s/.test(token)||seen.has(token))return;seen.add(token);out.push({token,label:String(label??'').trim().slice(0,80)||undefined});};
+  try{const walk=(value:unknown,label='')=>{if(Array.isArray(value)){value.forEach((item)=>walk(item,label));return;}if(value&&typeof value==='object'){const row=value as Record<string,unknown>;const next=String(row.label??row.name??row.email??label);Object.entries(row).forEach(([key,val])=>{/^(access_?token|token)$/i.test(key)?push(val,next):typeof val==='object'&&walk(val,next);});}};walk(JSON.parse(input));}catch{}
+  input.split(/\r?\n/).forEach((rawLine)=>{const line=rawLine.trim();if(!line||line.startsWith('#'))return;const url=line.match(/[?&]access_token=([^&#\s]+)/i);if(url)push(decodeURIComponent(url[1]));const named=line.match(/(?:access_?token|token)\s*[:=]\s*['"]?([^'"\s,;]+)/i);if(named)push(named[1]);const parts=line.split(/[|\t,;]/).map((part)=>part.trim()).filter(Boolean);parts.length>1?push(parts.at(-1),parts.slice(0,-1).join(' ')):push(line);});
+  return out;
 }
 
-function decodeFile(buffer: ArrayBuffer) {
-  const bytes = new Uint8Array(buffer);
-  if (bytes[0] === 0xff && bytes[1] === 0xfe) return new TextDecoder('utf-16le').decode(buffer);
-  if (bytes[0] === 0xfe && bytes[1] === 0xff) {
-    const swapped = new Uint8Array(bytes.length - 2);
-    for (let i = 2; i + 1 < bytes.length; i += 2) { swapped[i - 2] = bytes[i + 1]; swapped[i - 1] = bytes[i]; }
-    return new TextDecoder('utf-16le').decode(swapped);
-  }
-  return new TextDecoder('utf-8').decode(buffer);
-}
+export default function EztoolCloneDashboard(){
+  const [view,setView]=useState<View>('home'); const [assets,setAssets]=useState<Asset[]>([]); const [tokens,setTokens]=useState<TokenRow[]>([]); const [selectedToken,setSelectedToken]=useState(''); const [selectedIds,setSelectedIds]=useState<string[]>([]); const [query,setQuery]=useState(''); const [loading,setLoading]=useState(true); const [busy,setBusy]=useState(false); const [message,setMessage]=useState(''); const [error,setError]=useState(''); const [collapsed,setCollapsed]=useState(false); const [rightOpen,setRightOpen]=useState(true); const [threads,setThreads]=useState(3); const [delay,setDelay]=useState(0);
+  const [tokenFileName,setTokenFileName]=useState(''); const [tokenFileCount,setTokenFileCount]=useState(0); const fileItemsRef=useRef<ImportItem[]>([]);
+  const [modal,setModal]=useState<'none'|'bm'|'invite'|'notice'>('none'); const [noticeTitle,setNoticeTitle]=useState(''); const [noticeText,setNoticeText]=useState(''); const [bmName,setBmName]=useState(''); const [bmPages,setBmPages]=useState<PageOption[]>([]); const [bmPage,setBmPage]=useState(''); const [bmPreflight,setBmPreflight]=useState(false); const [opsBusinesses,setOpsBusinesses]=useState<BusinessOption[]>([]); const [inviteBusiness,setInviteBusiness]=useState(''); const [inviteEmail,setInviteEmail]=useState(''); const [inviteRole,setInviteRole]=useState<'ADMIN'|'EMPLOYEE'>('EMPLOYEE'); const [textInput,setTextInput]=useState(''); const [textOutput,setTextOutput]=useState('');
 
-function parseTokens(input: string) {
-  const found: ImportItem[] = [];
-  const seen = new Set<string>();
-  const push = (tokenRaw: unknown, labelRaw?: unknown) => {
-    const token = String(tokenRaw ?? '').trim().replace(/^['"]|['"]$/g, '');
-    if (token.length < 20 || token.length > 4096 || /\s/.test(token) || seen.has(token)) return;
-    seen.add(token);
-    const label = String(labelRaw ?? '').trim().slice(0, 80) || undefined;
-    found.push({ token, label });
-  };
-  try {
-    const json = JSON.parse(input) as unknown;
-    const walk = (value: unknown, label?: string) => {
-      if (Array.isArray(value)) return value.forEach((item) => walk(item, label));
-      if (value && typeof value === 'object') {
-        const row = value as Record<string, unknown>;
-        const nextLabel = String(row.label ?? row.name ?? row.email ?? label ?? '').trim();
-        for (const [key, val] of Object.entries(row)) {
-          if (/^(access_?token|token)$/i.test(key)) push(val, nextLabel);
-          else if (typeof val === 'object') walk(val, nextLabel);
-        }
-      }
-    };
-    walk(json);
-  } catch { /* not JSON */ }
-  for (const rawLine of input.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith('#')) continue;
-    const urlMatch = line.match(/[?&]access_token=([^&#\s]+)/i);
-    if (urlMatch) push(decodeURIComponent(urlMatch[1]));
-    const namedMatch = line.match(/(?:access_?token|token)\s*[:=]\s*['"]?([^'"\s,;]+)/i);
-    if (namedMatch) push(namedMatch[1]);
-    const parts = line.split(/[|\t,;]/).map((part) => part.trim()).filter(Boolean);
-    if (parts.length > 1) push(parts[parts.length - 1], parts.slice(0, -1).join(' '));
-    else push(line);
-  }
-  return found;
-}
+  const topGroup=groupForView(view); const selectedTokenRow=tokens.find((token)=>token.id===selectedToken); const liveTokenCount=tokens.filter((token)=>token.status==='active').length;
+  const load=useCallback(async()=>{setLoading(true);try{const[w,t]=await Promise.all([fetch('/api/workspace',{cache:'no-store'}),fetch('/api/token-inventory',{cache:'no-store'})]);const wd=await w.json() as {assets?:Asset[];error?:string};const td=await t.json() as {tokens?:TokenRow[];error?:string};if(!w.ok)throw new Error(wd.error||'Không tải được workspace.');if(!t.ok)throw new Error(td.error||'Không tải được token.');setAssets(wd.assets||[]);const next=td.tokens||[];setTokens(next);setSelectedToken((current)=>current&&next.some((token)=>token.id===current)?current:next.find((token)=>token.status==='active')?.id||next[0]?.id||'');}catch(err){setError((err as Error).message);}finally{setLoading(false);}},[]);
+  useEffect(()=>{const timer=window.setTimeout(()=>void load(),0);return()=>window.clearTimeout(timer);},[load]);
 
-function groupForView(view: View): TopGroup {
-  if (['ads', 'pixels', 'campaigns'].includes(view)) return 'ads';
-  if (['bm', 'bm-check', 'bm-sync', 'bm-links', 'create-bm'].includes(view)) return 'bm';
-  if (['pages', 'page-messages', 'page-uid', 'content-pages', 'content-page-posts', 'content-library', 'content-reply'].includes(view)) return 'page';
-  if (['groups', 'group-users', 'group-members', 'group-find', 'content-groups', 'content-group-posts'].includes(view)) return 'group';
-  return 'home';
-}
+  const rows=useMemo(()=>{const type=view==='ads'?'TKQC':view==='bm'||view==='bm-check'||view==='bm-sync'||view==='bm-links'?'BM':view==='pages'?'Page':view==='pixels'?'Dataset/Pixel':'';const needle=query.trim().toLowerCase();return assets.filter((asset)=>(!type||asset.type===type)&&(!needle||`${asset.name} ${metaId(asset)} ${asset.status}`.toLowerCase().includes(needle)));},[assets,query,view]);
 
-export default function EztoolCloneDashboard() {
-  const [view, setView] = useState<View>('home');
-  const [assets, setAssets] = useState<Asset[]>([]);
-  const [logs, setLogs] = useState<Entry[]>([]);
-  const [tokens, setTokens] = useState<TokenRow[]>([]);
-  const [selectedToken, setSelectedToken] = useState('');
-  const [selectedIds, setSelectedIds] = useState<string[]>([]);
-  const [query, setQuery] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [message, setMessage] = useState('');
-  const [error, setError] = useState('');
-  const [collapsed, setCollapsed] = useState(false);
-  const [rightOpen, setRightOpen] = useState(true);
-  const [delay, setDelay] = useState(0);
-  const [threads, setThreads] = useState(3);
-  const [tokenFileName, setTokenFileName] = useState('');
-  const [tokenFileCount, setTokenFileCount] = useState(0);
-  const fileItemsRef = useRef<ImportItem[]>([]);
+  async function syncToken(){if(!selectedToken)return setError('Chọn token trước khi tải dữ liệu.');setBusy(true);setError('');try{const response=await fetch('/api/resource-create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'import_token',tokenId:selectedToken})});const data=await response.json() as {error?:string;message?:string};if(!response.ok)throw new Error(data.error||'Không tải được dữ liệu.');setMessage(data.message||'Đã tải dữ liệu.');await load();}catch(err){setError((err as Error).message);}finally{setBusy(false);}}
+  async function healthCheck(){const ids=selectedIds.length?selectedIds:rows.map((row)=>row.id).slice(0,100);if(!ids.length)return setError('Chưa có dữ liệu để kiểm tra.');setBusy(true);setError('');try{const response=await fetch('/api/resource-health',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids,tokenId:selectedToken||undefined})});const data=await response.json() as {error?:string;message?:string};if(!response.ok)throw new Error(data.error||'Check trạng thái thất bại.');setMessage(data.message||`Đã kiểm tra ${ids.length} tài nguyên.`);await load();}catch(err){setError((err as Error).message);}finally{setBusy(false);}}
+  async function scanTokenIds(ids:string[]){if(!ids.length)return;setBusy(true);setError('');try{for(let i=0;i<ids.length;i+=20){const response=await fetch('/api/token-inventory',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'scan',ids:ids.slice(i,i+20)})});const data=await response.json() as {error?:string};if(!response.ok)throw new Error(data.error||'Check token thất bại.');}setMessage(`Đã check ${ids.length} token.`);await load();}catch(err){setError((err as Error).message);}finally{setBusy(false);}}
+  async function onTokenFile(file:File|null){setError('');setTokenFileCount(0);setTokenFileName(file?.name||'');fileItemsRef.current=[];if(!file)return;if(file.size>5*1024*1024)return setError('File token tối đa 5 MB.');const items=parseTokens(decodeFile(await file.arrayBuffer())).slice(0,5000);fileItemsRef.current=items;setTokenFileCount(items.length);if(!items.length)setError('Không tìm thấy token hợp lệ trong file.');}
+  async function importTokens(){const items=fileItemsRef.current;if(!items.length)return setError('Chọn file token trước.');setBusy(true);setError('');try{let imported=0;for(let i=0;i<items.length;i+=20){const response=await fetch('/api/token-inventory',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'import',items:items.slice(i,i+20)})});const data=await response.json() as {imported?:number;error?:string};if(!response.ok)throw new Error(data.error||'Nhập token thất bại.');imported+=data.imported||0;}setMessage(`Đã xử lý ${items.length} token, thêm mới ${imported}.`);await load();}catch(err){setError((err as Error).message);}finally{setBusy(false);}}
+  async function openBmModal(){if(!selectedToken)return setError('Chọn token trước.');setModal('bm');setBmPreflight(true);setError('');try{const response=await fetch(`/api/bm-create?tokenId=${encodeURIComponent(selectedToken)}`,{cache:'no-store'});const data=await response.json() as {pages?:PageOption[];error?:string};if(!response.ok)throw new Error(data.error||'Không đọc được Page của token.');const pages=data.pages||[];setBmPages(pages);setBmPage(pages[0]?.id||'');}catch(err){setError((err as Error).message);}finally{setBmPreflight(false);}}
+  async function createBm(){if(!selectedToken||!bmName.trim()||!bmPage)return setError('Chọn token, Page và nhập tên BM.');setBusy(true);setError('');try{const response=await fetch('/api/bm-create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tokenId:selectedToken,name:bmName.trim(),primaryPage:bmPage,timezone:140,vertical:'ADVERTISING',purposeConfirmed:true})});const data=await response.json() as {error?:string;message?:string};if(!response.ok)throw new Error(data.error||'Tạo BM thất bại.');setMessage(data.message||'Đã tạo BM.');setModal('none');setBmName('');await load();}catch(err){setError((err as Error).message);}finally{setBusy(false);}}
+  async function openInvite(){if(!selectedToken)return setError('Chọn token trước.');setBusy(true);setError('');try{const response=await fetch(`/api/meta-token-ops?tokenId=${encodeURIComponent(selectedToken)}`,{cache:'no-store'});const data=await response.json() as {businesses?:BusinessOption[];error?:string};if(!response.ok)throw new Error(data.error||'Không tải được BM của token.');const businesses=data.businesses||[];setOpsBusinesses(businesses);setInviteBusiness(businesses[0]?.id||'');setModal('invite');}catch(err){setError((err as Error).message);}finally{setBusy(false);}}
+  async function inviteUser(){if(!selectedToken||!inviteBusiness||!inviteEmail.trim())return setError('Nhập đủ BM và email.');setBusy(true);setError('');try{const response=await fetch('/api/meta-token-ops',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'invite_business_user',tokenId:selectedToken,businessId:inviteBusiness,email:inviteEmail.trim(),role:inviteRole,purposeConfirmed:true})});const data=await response.json() as {error?:string;message?:string};if(!response.ok)throw new Error(data.error||'Không gửi được lời mời.');setMessage(data.message||'Đã gửi lời mời.');setModal('none');setInviteEmail('');}catch(err){setError((err as Error).message);}finally{setBusy(false);}}
+  function notice(title:string,text:string){setNoticeTitle(title);setNoticeText(text);setModal('notice');}
+  function selectView(next:View){setView(next);setSelectedIds([]);setQuery('');setError('');setMessage('');}
 
-  const [modal, setModal] = useState<'none' | 'bm' | 'invite' | 'notice'>('none');
-  const [noticeTitle, setNoticeTitle] = useState('');
-  const [noticeText, setNoticeText] = useState('');
-  const [bmName, setBmName] = useState('');
-  const [bmPages, setBmPages] = useState<PageOption[]>([]);
-  const [bmPage, setBmPage] = useState('');
-  const [bmPreflight, setBmPreflight] = useState(false);
-  const [opsBusinesses, setOpsBusinesses] = useState<BusinessOption[]>([]);
-  const [opsAds, setOpsAds] = useState<AdAccountOption[]>([]);
-  const [inviteBusiness, setInviteBusiness] = useState('');
-  const [inviteEmail, setInviteEmail] = useState('');
-  const [inviteRole, setInviteRole] = useState<'ADMIN' | 'EMPLOYEE'>('EMPLOYEE');
-  const [textInput, setTextInput] = useState('');
-  const [textOutput, setTextOutput] = useState('');
-
-  const topGroup = groupForView(view);
-  const selectedTokenRow = tokens.find((token) => token.id === selectedToken);
-  const liveTokenCount = tokens.filter((token) => token.status === 'active').length;
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const [workspaceResponse, tokenResponse] = await Promise.all([
-        fetch('/api/workspace', { cache: 'no-store' }),
-        fetch('/api/token-inventory', { cache: 'no-store' }),
-      ]);
-      const workspace = await workspaceResponse.json() as WorkspaceResponse;
-      const tokenData = await tokenResponse.json() as { tokens?: TokenRow[]; error?: string };
-      if (!workspaceResponse.ok) throw new Error(workspace.error || 'Không tải được workspace.');
-      if (!tokenResponse.ok) throw new Error(tokenData.error || 'Không tải được token.');
-      setAssets(workspace.assets || []);
-      setLogs(workspace.logs || []);
-      const nextTokens = tokenData.tokens || [];
-      setTokens(nextTokens);
-      setSelectedToken((current) => current && nextTokens.some((token) => token.id === current)
-        ? current
-        : nextTokens.find((token) => token.status === 'active')?.id || nextTokens[0]?.id || '');
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => { void load(); }, [load]);
-
-  const rows = useMemo(() => {
-    const type = view === 'ads' ? 'TKQC' : view === 'bm' || view === 'bm-check' || view === 'bm-sync' || view === 'bm-links' ? 'BM' : view === 'pages' ? 'Page' : view === 'pixels' ? 'Dataset/Pixel' : '';
-    const needle = query.trim().toLowerCase();
-    return assets.filter((asset) => (!type || asset.type === type) && (!needle || `${asset.name} ${metaId(asset)} ${asset.status}`.toLowerCase().includes(needle)));
-  }, [assets, query, view]);
-
-  async function syncToken() {
-    if (!selectedToken) return setError('Chọn token trước khi tải dữ liệu.');
-    setBusy(true); setError(''); setMessage('');
-    try {
-      const response = await fetch('/api/resource-create', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'import_token', tokenId: selectedToken }) });
-      const data = await response.json() as { error?: string; message?: string };
-      if (!response.ok) throw new Error(data.error || 'Không tải được dữ liệu.');
-      setMessage(data.message || 'Đã tải dữ liệu.');
-      await load();
-    } catch (err) { setError((err as Error).message); } finally { setBusy(false); }
-  }
-
-  async function healthCheck() {
-    const ids = selectedIds.length ? selectedIds : rows.map((item) => item.id).slice(0, 100);
-    if (!ids.length) return setError('Chưa có dữ liệu để kiểm tra.');
-    setBusy(true); setError('');
-    try {
-      const response = await fetch('/api/resource-health', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids, tokenId: selectedToken || undefined }) });
-      const data = await response.json() as { error?: string; message?: string };
-      if (!response.ok) throw new Error(data.error || 'Check trạng thái thất bại.');
-      setMessage(data.message || `Đã kiểm tra ${ids.length} tài nguyên.`);
-      await load();
-    } catch (err) { setError((err as Error).message); } finally { setBusy(false); }
-  }
-
-  async function scanTokenIds(ids: string[]) {
-    if (!ids.length) return;
-    setBusy(true); setError('');
-    try {
-      for (let i = 0; i < ids.length; i += 20) {
-        const response = await fetch('/api/token-inventory', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'scan', ids: ids.slice(i, i + 20) }) });
-        const data = await response.json() as { error?: string };
-        if (!response.ok) throw new Error(data.error || 'Check token thất bại.');
-      }
-      setMessage(`Đã check ${ids.length} token.`);
-      await load();
-    } catch (err) { setError((err as Error).message); } finally { setBusy(false); }
-  }
-
-  async function onTokenFile(file: File | null) {
-    setError(''); setTokenFileCount(0); setTokenFileName(file?.name || ''); fileItemsRef.current = [];
-    if (!file) return;
-    if (file.size > 5 * 1024 * 1024) return setError('File token tối đa 5 MB.');
-    const items = parseTokens(decodeFile(await file.arrayBuffer())).slice(0, 5000);
-    fileItemsRef.current = items;
-    setTokenFileCount(items.length);
-    if (!items.length) setError('Không tìm thấy token hợp lệ trong file.');
-  }
-
-  async function importTokens() {
-    const items = fileItemsRef.current;
-    if (!items.length) return setError('Chọn file token trước.');
-    setBusy(true); setError('');
-    try {
-      let imported = 0;
-      for (let i = 0; i < items.length; i += 20) {
-        const response = await fetch('/api/token-inventory', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'import', items: items.slice(i, i + 20) }) });
-        const data = await response.json() as { imported?: number; error?: string };
-        if (!response.ok) throw new Error(data.error || 'Nhập token thất bại.');
-        imported += data.imported || 0;
-      }
-      setMessage(`Đã xử lý ${items.length} token, thêm mới ${imported}.`);
-      await load();
-    } catch (err) { setError((err as Error).message); } finally { setBusy(false); }
-  }
-
-  async function openBmModal() {
-    if (!selectedToken) return setError('Chọn token trước.');
-    setModal('bm'); setBmPreflight(true); setError('');
-    try {
-      const response = await fetch(`/api/bm-create?tokenId=${encodeURIComponent(selectedToken)}`, { cache: 'no-store' });
-      const data = await response.json() as { pages?: PageOption[]; error?: string };
-      if (!response.ok) throw new Error(data.error || 'Không đọc được Page của token.');
-      const pages = data.pages || [];
-      setBmPages(pages); setBmPage(pages[0]?.id || '');
-    } catch (err) { setError((err as Error).message); } finally { setBmPreflight(false); }
-  }
-
-  async function createBm() {
-    if (!selectedToken || !bmName.trim() || !bmPage) return setError('Chọn token, Page và nhập tên BM.');
-    setBusy(true); setError('');
-    try {
-      const response = await fetch('/api/bm-create', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tokenId: selectedToken, name: bmName.trim(), primaryPage: bmPage, timezone: 140, vertical: 'ADVERTISING', purposeConfirmed: true }) });
-      const data = await response.json() as { error?: string; message?: string };
-      if (!response.ok) throw new Error(data.error || 'Tạo BM thất bại.');
-      setMessage(data.message || 'Đã tạo BM.'); setModal('none'); setBmName('');
-      await load();
-    } catch (err) { setError((err as Error).message); } finally { setBusy(false); }
-  }
-
-  async function loadOps() {
-    if (!selectedToken) return setError('Chọn token trước.');
-    const response = await fetch(`/api/meta-token-ops?tokenId=${encodeURIComponent(selectedToken)}`, { cache: 'no-store' });
-    const data = await response.json() as { businesses?: BusinessOption[]; adAccounts?: AdAccountOption[]; error?: string };
-    if (!response.ok) throw new Error(data.error || 'Không tải được tài nguyên token.');
-    setOpsBusinesses(data.businesses || []); setOpsAds(data.adAccounts || []);
-    setInviteBusiness((data.businesses || [])[0]?.id || '');
-  }
-
-  async function openInvite() {
-    setBusy(true); setError('');
-    try { await loadOps(); setModal('invite'); } catch (err) { setError((err as Error).message); } finally { setBusy(false); }
-  }
-
-  async function inviteUser() {
-    if (!selectedToken || !inviteBusiness || !inviteEmail.trim()) return setError('Nhập đủ BM và email.');
-    setBusy(true); setError('');
-    try {
-      const response = await fetch('/api/meta-token-ops', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'invite_business_user', tokenId: selectedToken, businessId: inviteBusiness, email: inviteEmail.trim(), role: inviteRole, purposeConfirmed: true }) });
-      const data = await response.json() as { error?: string; message?: string };
-      if (!response.ok) throw new Error(data.error || 'Không gửi được lời mời.');
-      setMessage(data.message || 'Đã gửi lời mời.'); setModal('none'); setInviteEmail('');
-    } catch (err) { setError((err as Error).message); } finally { setBusy(false); }
-  }
-
-  function notice(title: string, text: string) { setNoticeTitle(title); setNoticeText(text); setModal('notice'); }
-
-  function selectView(next: View) { setView(next); setSelectedIds([]); setQuery(''); setError(''); setMessage(''); }
-
-  function renderHome() {
-    return <div className={styles.homeBody}>
-      <section className={styles.welcome}>
-        <div className={styles.bigAvatar}>AW<span /></div>
-        <div><h1>Xin chào, ADS WORKSPACE!</h1><p>Workspace cá nhân · {liveTokenCount}/{tokens.length} token đang LIVE</p><span className={styles.coin}>● 0 đ</span></div>
-        <div className={styles.packageBox}><Zap size={26}/><div><strong>Workspace cá nhân</strong><small>Dùng các công cụ đã kết nối</small></div></div>
-      </section>
-      <div className={styles.heroTiles}>
-        <button onClick={() => selectView('tokens')} className={styles.tileGreen}><KeyRound/><span>Phân loại token</span></button>
-        <button onClick={() => void openBmModal()} className={styles.tileOrange}><Plus/><span>Tạo BM</span></button>
-        <button onClick={() => selectView('resources')} className={styles.tilePurple}><Database/><span>Trung tâm tài nguyên</span></button>
-        <button onClick={() => selectView('workflow')} className={styles.tileBlue}><Workflow/><span>Workflow</span></button>
-      </div>
-      <section className={styles.banner}>
-        <div><span>ADS WORKSPACE</span><h2>Quản lý tài nguyên Meta tập trung</h2><p>Token, BM, TKQC, Page, Pixel và các công cụ vận hành trong một giao diện.</p></div>
-        <div className={styles.bannerArt}><i/><i/><i/><i/></div>
-      </section>
-      <div className={styles.sectionTitle}><span className={styles.sectionIcon}><Zap size={16}/></span><strong>Ứng dụng nổi bật</strong></div>
-      <div className={styles.appGrid}>{appCards.map(({ view: cardView, title, description, icon: Icon }) => <button key={cardView} onClick={() => selectView(cardView)}><span><Icon size={20}/></span><strong>{title}</strong><small>{description}</small></button>)}</div>
-    </div>;
-  }
-
-  function utilityTools() {
-    if (topGroup === 'ads') return [
-      ['Kích hoạt trả trước', WalletCards, false, () => notice('Kích hoạt trả trước', 'Chưa có API công khai ổn định cho thao tác này trong app hiện tại.')],
-      ['Add thẻ', CreditCard, false, () => notice('Add thẻ', 'App không thu thập số thẻ/CVV. Hãy thêm phương thức thanh toán trong Meta Billing chính thức.')],
-      ['Thêm người', UserPlus, true, () => void openInvite()],
-      ['Xóa Camp, Nháp', Trash2, false, () => notice('Xóa Camp, Nháp', 'Chưa bật thao tác xóa hàng loạt. Phần đọc campaign hiện được giữ nguyên.')],
-      ['Tải hóa đơn', ReceiptText, false, () => notice('Tải hóa đơn', 'Cần endpoint billing/invoice được Meta cấp cho tài khoản tương ứng.')],
-      ['Thoát tài khoản', LogOut, false, () => notice('Thoát tài khoản', 'Không tự động rời tài khoản quảng cáo khi chưa có xác nhận và endpoint phù hợp.')],
-      ['Lên Camp', Rocket, false, () => selectView('campaigns')],
-      ['Check xác minh vị trí', MapPinCheck, false, () => notice('Check xác minh vị trí', 'Chưa có endpoint công khai tương ứng trong luồng token hiện tại.')],
+  function utilityTools(){
+    if(topGroup==='ads')return [
+      ['Kích hoạt trả trước',WalletCards,false,()=>notice('Kích hoạt trả trước','Chưa có API công khai ổn định cho thao tác này trong app hiện tại.')],['Add thẻ',CreditCard,false,()=>notice('Add thẻ','App không thu thập số thẻ/CVV. Hãy dùng Meta Billing chính thức.')],['Thêm người',UserPlus,true,()=>void openInvite()],['Xóa Camp, Nháp',Trash2,false,()=>notice('Xóa Camp, Nháp','Chưa bật thao tác xóa hàng loạt. Phần đọc campaign vẫn giữ nguyên.')],['Tải hóa đơn',ReceiptText,false,()=>notice('Tải hóa đơn','Cần quyền billing/invoice tương ứng từ Meta.')],['Thoát tài khoản',LogOut,false,()=>notice('Thoát tài khoản','Không tự động rời TKQC khi chưa có endpoint và xác nhận phù hợp.')],['Lên Camp',Rocket,false,()=>selectView('campaigns')],['Check xác minh vị trí',MapPinCheck,false,()=>notice('Check xác minh vị trí','Chưa có endpoint công khai tương ứng trong luồng token hiện tại.')],
     ] as const;
-    if (topGroup === 'bm') return [
-      ['Kích Bm3', Zap, false, () => notice('Kích Bm3', 'Không giả lập hạn mức tạo tài khoản quảng cáo. Meta quyết định eligibility phía server.')],
-      ['Thêm tài sản cho user', UserPlus, false, () => notice('Thêm tài sản cho user', 'Sẽ chỉ bật khi asset-permission endpoint được xác nhận cho Business của bạn.')],
-      ['Backup BM', PackageOpen, false, () => notice('Backup BM', 'Có thể sao lưu metadata/tài nguyên đã đọc; không thể sao chép quyền sở hữu BM.')],
-      ['Add thẻ', CreditCard, false, () => notice('Add thẻ', 'App không thu thập số thẻ/CVV. Dùng Meta Billing để thêm thẻ.')],
-      ['Nhóm tài sản BM', Boxes, false, () => notice('Nhóm tài sản BM', 'Chưa nối asset group API trong phiên bản này.')],
-      ['Hủy lời mời', Ban, false, () => notice('Hủy lời mời', 'Chưa nối endpoint hủy invitation trong backend.')],
-      ['Đổi thông tin BM', Building2, false, () => notice('Đổi thông tin BM', 'Chưa bật thay đổi thông tin Business để tránh ghi ngoài ý muốn.')],
-      ['Tạo BM', Plus, true, () => void openBmModal()],
+    if(topGroup==='bm')return [
+      ['Kích Bm3',Zap,false,()=>notice('Kích Bm3','Không giả lập hạn mức tạo TKQC; Meta quyết định eligibility phía server.')],['Thêm tài sản cho user',UserPlus,false,()=>notice('Thêm tài sản cho user','Chỉ bật khi asset-permission endpoint được xác nhận cho Business của bạn.')],['Backup BM',PackageOpen,false,()=>notice('Backup BM','Có thể sao lưu metadata đã đọc; không thể sao chép quyền sở hữu BM.')],['Add thẻ',CreditCard,false,()=>notice('Add thẻ','App không thu thập số thẻ/CVV.')],['Nhóm tài sản BM',Boxes,false,()=>notice('Nhóm tài sản BM','Chưa nối asset group API.')],['Hủy lời mời',Ban,false,()=>notice('Hủy lời mời','Chưa nối endpoint hủy invitation.')],['Đổi thông tin BM',Building2,false,()=>notice('Đổi thông tin BM','Chưa bật ghi thay đổi Business để tránh thao tác ngoài ý muốn.')],['Tạo BM',Plus,true,()=>void openBmModal()],
     ] as const;
-    return [
-      ['Check token', KeyRound, true, () => selectedToken && void scanTokenIds([selectedToken])],
-      ['Đồng bộ dữ liệu', RefreshCw, true, () => void syncToken()],
-      ['Cài đặt', Settings, false, () => selectView('settings')],
-    ] as const;
+    return [['Check token',KeyRound,true,()=>selectedToken&&void scanTokenIds([selectedToken])],['Đồng bộ dữ liệu',RefreshCw,true,()=>void syncToken()],['Cài đặt',Settings,false,()=>selectView('settings')]] as const;
   }
 
-  function renderResourceView() {
-    const isBm = topGroup === 'bm';
-    return <div className={styles.resourceShell}>
-      <div className={styles.resourceMain}>
-        <div className={styles.toolbar}>
-          <button className={styles.startButton} onClick={() => void syncToken()} disabled={busy}><Play size={16}/> Bắt đầu</button>
-          <button title="Bộ lọc"><Filter size={16}/></button><button title="Danh sách"><ListFilter size={16}/></button><button title="Nhập"><ImageIcon size={16}/></button><button title="Lịch"><CalendarDays size={16}/></button><button title="Cột"><Columns3 size={16}/></button><button title="Làm mới" onClick={() => void load()}><RefreshCw size={16}/></button>
-          <label className={styles.searchBox}><Search size={16}/><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={isBm ? 'Tìm kiếm BM...' : view === 'pages' ? 'Tìm kiếm Page...' : 'Tìm kiếm tài khoản ads...'}/><Settings size={15}/></label>
-          <label className={styles.counter}>Luồng <input type="number" min={1} max={20} value={threads} onChange={(event) => setThreads(Number(event.target.value) || 1)}/></label>
-          <label className={styles.counter}>Delay <input type="number" min={0} max={3600} value={delay} onChange={(event) => setDelay(Number(event.target.value) || 0)}/></label>
-          {isBm ? <button className={styles.outlineButton} onClick={() => void openBmModal()}><Plus size={15}/> Tạo BM</button> : <button className={styles.outlineButton} onClick={() => selectView('campaigns')}><Megaphone size={15}/> Quản lý Camp</button>}
-        </div>
-        <div className={styles.tableHeader}><span><input type="checkbox" checked={rows.length > 0 && selectedIds.length === rows.length} onChange={(event) => setSelectedIds(event.target.checked ? rows.map((row) => row.id) : [])}/></span><span>STT</span><span>Trạng thái</span><span>Tài khoản</span><span>ID {isBm ? 'BM' : view === 'pages' ? 'PAGE' : 'TKQC'}</span><span>Tiến trình</span><span>→</span></div>
-        <div className={styles.dataArea}>
-          {loading ? <div className={styles.emptyState}><LoaderCircle className={styles.spin}/><h3>Đang tải dữ liệu</h3></div> : rows.length === 0 ? <div className={styles.emptyState}><span><CircleHelp size={30}/></span><h3>Chưa có dữ liệu</h3><p>Xin vui lòng tải dữ liệu</p><button onClick={() => void syncToken()} disabled={!selectedToken || busy}>Tải dữ liệu</button></div> : <div className={styles.rows}>{rows.map((asset, index) => <div className={styles.row} key={asset.id}><span><input type="checkbox" checked={selectedIds.includes(asset.id)} onChange={(event) => setSelectedIds((current) => event.target.checked ? [...current, asset.id] : current.filter((id) => id !== asset.id))}/></span><span>{index + 1}</span><span><b className={asset.status === 'LIVE' || asset.status === 'Truy cập được' ? styles.live : styles.dead}>{asset.status}</b></span><span>{asset.name}</span><span>{metaId(asset)}</span><span>{asset.healthNote || 'Sẵn sàng'}</span><span>→</span></div>)}</div>}
-        </div>
-        <div className={styles.statusBar}><span>TỔNG: <b>{rows.length}</b></span><span>CHỌN: <b>{selectedIds.length}</b></span><span>VÙNG: <b>0</b></span><button>🟠 Mix⌃</button><button>◉ Ẩn tiền tệ</button></div>
-      </div>
-      <aside className={`${styles.utilityPanel} ${rightOpen ? '' : styles.utilityClosed}`}>
-        <button className={styles.utilityToggle} onClick={() => setRightOpen((value) => !value)}>{rightOpen ? <ChevronRight/> : <ChevronLeft/>}</button>
-        {rightOpen && <><div className={styles.utilityHead}><Grid2X2 size={21}/><div><strong>Tiện ích đã bật <span>0/{isBm ? 26 : 20}</span></strong><small>Kéo thả để sắp xếp</small></div><button><SlidersHorizontal size={16}/></button><button><Settings size={16}/></button></div><label className={styles.utilitySearch}><Search size={16}/><input placeholder="Tìm tính năng..."/></label><div className={styles.utilityList}>{utilityTools().map(([label, Icon, active, action]) => <button key={label} onClick={action}><span className={styles.drag}>⠿</span><span className={styles.toolIcon}><Icon size={17}/></span><strong>{label}</strong>{active ? <BadgeCheck size={16}/> : <LockKeyhole size={16}/>}</button>)}</div></>}
-      </aside>
-    </div>;
-  }
+  function renderHome(){return <div className={styles.homeBody}><section className={styles.welcome}><div className={styles.bigAvatar}>AW<span/></div><div><h1>Xin chào, ADS WORKSPACE!</h1><p>Workspace cá nhân · {liveTokenCount}/{tokens.length} token đang LIVE</p><span className={styles.coin}>● 0 đ</span></div><div className={styles.packageBox}><Zap size={26}/><div><strong>Workspace cá nhân</strong><small>Dùng các công cụ đã kết nối</small></div></div></section><div className={styles.heroTiles}><button onClick={()=>selectView('tokens')} className={styles.tileGreen}><KeyRound/><span>Phân loại token</span></button><button onClick={()=>void openBmModal()} className={styles.tileOrange}><Plus/><span>Tạo BM</span></button><button onClick={()=>selectView('resources')} className={styles.tilePurple}><Database/><span>Trung tâm tài nguyên</span></button><button onClick={()=>selectView('workflow')} className={styles.tileBlue}><Workflow/><span>Workflow</span></button></div><section className={styles.banner}><div><span>ADS WORKSPACE</span><h2>Quản lý tài nguyên Meta tập trung</h2><p>Token, BM, TKQC, Page, Pixel và các công cụ vận hành trong một giao diện.</p></div><div className={styles.bannerArt}><i/><i/><i/><i/></div></section><div className={styles.sectionTitle}><span className={styles.sectionIcon}><Zap size={16}/></span><strong>Ứng dụng nổi bật</strong></div><div className={styles.appGrid}>{appCards.map(({view:cardView,title,description,icon:Icon})=><button key={cardView} onClick={()=>selectView(cardView)}><span><Icon size={20}/></span><strong>{title}</strong><small>{description}</small></button>)}</div></div>}
 
-  function renderTokens() {
-    return <div className={styles.panelPage}><div className={styles.pageHead}><div><h1>Phân loại token</h1><p>Nhận file token nhiều định dạng, check LIVE/DIE, quyền và số lượng tài nguyên.</p></div><button className={styles.primary} onClick={() => void scanTokenIds(tokens.map((token) => token.id))} disabled={busy || !tokens.length}><RefreshCw size={16}/> Check tất cả</button></div>
-      <div className={styles.tokenImport}><label><Upload size={22}/><strong>Chọn file token</strong><small>TXT, CSV, TSV, JSON, URL, UTF-8/UTF-16 và file không có phần mở rộng.</small><input type="file" onChange={(event) => void onTokenFile(event.target.files?.[0] || null)}/></label><div><strong>{tokenFileName || 'Chưa chọn file'}</strong><span>{tokenFileCount} token nhận diện</span><button className={styles.primary} onClick={() => void importTokens()} disabled={busy || !tokenFileCount}>Nhập & Check</button></div></div>
-      <div className={styles.tokenTable}><div className={styles.tokenHeader}><span>Token</span><span>Trạng thái</span><span>BM</span><span>Page</span><span>TKQC</span><span>LIVE Ads</span><span>DIE Ads</span><span>Tổng</span><span>Quyền</span><span/></div>{tokens.map((token) => <div key={token.id}><span><strong>{token.label}</strong><small>{token.metaUserName || token.fingerprint}</small></span><span><b className={token.status === 'active' ? styles.live : styles.dead}>{statusText[token.status]}</b></span><span>{token.inventory?.businessCount ?? 0}</span><span>{token.inventory?.pageCount ?? 0}</span><span>{token.inventory?.adAccountCount ?? 0}</span><span>{token.inventory?.liveAdCount ?? 0}</span><span>{token.inventory?.dieAdCount ?? 0}</span><span>{token.inventory?.totalResources ?? 0}</span><span className={styles.permissionText}>{token.inventory?.permissions?.slice(0, 4).join(', ') || '—'}</span><span><button onClick={() => void scanTokenIds([token.id])}>Check token</button></span></div>)}</div>
-    </div>;
-  }
+  function renderResource(){const isBm=topGroup==='bm';return <div className={styles.resourceShell}><div className={styles.resourceMain}><div className={styles.toolbar}><button className={styles.startButton} onClick={()=>void healthCheck()} disabled={busy}><Play size={16}/> Bắt đầu</button><button title="Bộ lọc"><Filter size={16}/></button><button title="Danh sách"><ListFilter size={16}/></button><button title="Nhập"><ImageIcon size={16}/></button><button title="Lịch"><CalendarDays size={16}/></button><button title="Cột"><Columns3 size={16}/></button><button title="Làm mới" onClick={()=>void load()}><RefreshCw size={16}/></button><label className={styles.searchBox}><Search size={16}/><input value={query} onChange={(event)=>setQuery(event.target.value)} placeholder={isBm?'Tìm kiếm BM...':view==='pages'?'Tìm kiếm Page...':'Tìm kiếm tài khoản ads...'}/><Settings size={15}/></label><label className={styles.counter}>Luồng <input type="number" min={1} max={20} value={threads} onChange={(event)=>setThreads(Number(event.target.value)||1)}/></label><label className={styles.counter}>Delay <input type="number" min={0} max={3600} value={delay} onChange={(event)=>setDelay(Number(event.target.value)||0)}/></label>{isBm?<button className={styles.outlineButton} onClick={()=>void openBmModal()}><Plus size={15}/> Tạo BM</button>:<button className={styles.outlineButton} onClick={()=>selectView('campaigns')}><Megaphone size={15}/> Quản lý Camp</button>}</div><div className={styles.tableHeader}><span><input type="checkbox" checked={rows.length>0&&selectedIds.length===rows.length} onChange={(event)=>setSelectedIds(event.target.checked?rows.map((row)=>row.id):[])}/></span><span>STT</span><span>Trạng thái</span><span>Tài khoản</span><span>ID {isBm?'BM':view==='pages'?'PAGE':'TKQC'}</span><span>Tiến trình</span><span>→</span></div><div className={styles.dataArea}>{loading?<div className={styles.emptyState}><LoaderCircle className={styles.spin}/><h3>Đang tải dữ liệu</h3></div>:rows.length===0?<div className={styles.emptyState}><span><CircleHelp size={30}/></span><h3>Chưa có dữ liệu</h3><p>Xin vui lòng tải dữ liệu</p><button onClick={()=>void syncToken()} disabled={!selectedToken||busy}>Tải dữ liệu</button></div>:<div className={styles.rows}>{rows.map((asset,rowIndex)=><div className={styles.row} key={asset.id}><span><input type="checkbox" checked={selectedIds.includes(asset.id)} onChange={(event)=>setSelectedIds((current)=>event.target.checked?[...current,asset.id]:current.filter((id)=>id!==asset.id))}/></span><span>{rowIndex+1}</span><span><b className={asset.status==='LIVE'||asset.status==='Truy cập được'?styles.live:styles.dead}>{asset.status}</b></span><span>{asset.name}</span><span>{metaId(asset)}</span><span>{asset.healthNote||'Sẵn sàng'}</span><span>→</span></div>)}</div>}</div><div className={styles.statusBar}><span>TỔNG: <b>{rows.length}</b></span><span>CHỌN: <b>{selectedIds.length}</b></span><span>VÙNG: <b>0</b></span><button>🟠 Mix⌃</button><button>◉ Ẩn tiền tệ</button></div></div><aside className={`${styles.utilityPanel} ${rightOpen?'':styles.utilityClosed}`}><button className={styles.utilityToggle} onClick={()=>setRightOpen((value)=>!value)}>{rightOpen?<ChevronRight/>:<ChevronLeft/>}</button>{rightOpen&&<><div className={styles.utilityHead}><Grid2X2 size={21}/><div><strong>Tiện ích đã bật <span>0/{isBm?26:20}</span></strong><small>Kéo thả để sắp xếp</small></div><button><SlidersHorizontal size={16}/></button><button><Settings size={16}/></button></div><label className={styles.utilitySearch}><Search size={16}/><input placeholder="Tìm tính năng..."/></label><div className={styles.utilityList}>{utilityTools().map(([label,Icon,active,action])=><button key={label} onClick={action}><span className={styles.drag}>⠿</span><span className={styles.toolIcon}><Icon size={17}/></span><strong>{label}</strong>{active?<BadgeCheck size={16}/>:<LockKeyhole size={16}/>}</button>)}</div></>}</aside></div>}
 
-  function renderText() {
-    const transform = (mode: 'clean' | 'dedupe' | 'sort') => {
-      let lines = textInput.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-      if (mode === 'dedupe') lines = Array.from(new Set(lines));
-      if (mode === 'sort') lines = [...lines].sort((a, b) => a.localeCompare(b, 'vi'));
-      setTextOutput(lines.join('\n'));
-    };
-    return <div className={styles.panelPage}><div className={styles.pageHead}><div><h1>Xử lý Text</h1><p>Làm sạch, lọc trùng và sắp xếp danh sách.</p></div></div><div className={styles.textGrid}><textarea value={textInput} onChange={(event) => setTextInput(event.target.value)} placeholder="Dữ liệu đầu vào..."/><textarea value={textOutput} onChange={(event) => setTextOutput(event.target.value)} placeholder="Kết quả..."/></div><div className={styles.inlineActions}><button onClick={() => transform('clean')}>Làm sạch</button><button onClick={() => transform('dedupe')}>Lọc trùng</button><button onClick={() => transform('sort')}>Sắp xếp</button><button className={styles.primary} onClick={() => void navigator.clipboard.writeText(textOutput)} disabled={!textOutput}><Copy size={15}/> Copy</button></div></div>;
-  }
+  function renderTokens(){return <div className={styles.panelPage}><div className={styles.pageHead}><div><h1>Phân loại token</h1><p>Nhận file token nhiều định dạng, check LIVE/DIE, quyền và số lượng tài nguyên.</p></div><button className={styles.primary} onClick={()=>void scanTokenIds(tokens.map((token)=>token.id))} disabled={busy||!tokens.length}><RefreshCw size={16}/> Check tất cả</button></div><div className={styles.tokenImport}><label><Upload size={22}/><strong>Chọn file token</strong><small>TXT, CSV, TSV, JSON, URL, UTF-8/UTF-16 và file không có phần mở rộng.</small><input type="file" onChange={(event)=>void onTokenFile(event.target.files?.[0]||null)}/></label><div><strong>{tokenFileName||'Chưa chọn file'}</strong><span>{tokenFileCount} token nhận diện</span><button className={styles.primary} onClick={()=>void importTokens()} disabled={busy||!tokenFileCount}>Nhập & Check</button></div></div><div className={styles.tokenTable}><div className={styles.tokenHeader}><span>Token</span><span>Trạng thái</span><span>BM</span><span>Page</span><span>TKQC</span><span>LIVE Ads</span><span>DIE Ads</span><span>Tổng</span><span>Quyền</span><span/></div>{tokens.map((token)=><div key={token.id}><span><strong>{token.label}</strong><small>{token.metaUserName||token.fingerprint}</small></span><span><b className={token.status==='active'?styles.live:styles.dead}>{statusText[token.status]}</b></span><span>{token.inventory?.businessCount??0}</span><span>{token.inventory?.pageCount??0}</span><span>{token.inventory?.adAccountCount??0}</span><span>{token.inventory?.liveAdCount??0}</span><span>{token.inventory?.dieAdCount??0}</span><span>{token.inventory?.totalResources??0}</span><span className={styles.permissionText}>{token.inventory?.permissions?.slice(0,4).join(', ')||'—'}</span><span><button onClick={()=>void scanTokenIds([token.id])}>Check token</button></span></div>)}</div></div>}
+  function renderText(){const transform=(mode:'clean'|'dedupe'|'sort')=>{let lines=textInput.split(/\r?\n/).map((line)=>line.trim()).filter(Boolean);if(mode==='dedupe')lines=Array.from(new Set(lines));if(mode==='sort')lines=[...lines].sort((a,b)=>a.localeCompare(b,'vi'));setTextOutput(lines.join('\n'));};return <div className={styles.panelPage}><div className={styles.pageHead}><div><h1>Xử lý Text</h1><p>Làm sạch, lọc trùng và sắp xếp danh sách.</p></div></div><div className={styles.textGrid}><textarea value={textInput} onChange={(event)=>setTextInput(event.target.value)} placeholder="Dữ liệu đầu vào..."/><textarea value={textOutput} onChange={(event)=>setTextOutput(event.target.value)} placeholder="Kết quả..."/></div><div className={styles.inlineActions}><button onClick={()=>transform('clean')}>Làm sạch</button><button onClick={()=>transform('dedupe')}>Lọc trùng</button><button onClick={()=>transform('sort')}>Sắp xếp</button><button className={styles.primary} onClick={()=>void navigator.clipboard.writeText(textOutput)} disabled={!textOutput}><Copy size={15}/> Copy</button></div></div>}
+  function renderGeneric(){const title=appCards.find((item)=>item.view===view)?.title||sideByGroup[topGroup].find((item)=>item.key===view)?.label||'Công cụ';return <div className={styles.panelPage}><div className={styles.pageHead}><div><h1>{title}</h1><p>Mục này đã được đưa vào đúng nhóm như giao diện tham chiếu.</p></div></div><div className={styles.genericCard}><AppWindow size={40}/><h2>{title}</h2><p>Những luồng backend hiện có vẫn được giữ. Với chức năng chưa có API chính thức, app chỉ hiển thị khung chức năng và không dùng cookie/private endpoint để giả lập.</p></div></div>}
+  function renderMain(){if(view==='home')return renderHome();if(['ads','pixels','bm','bm-check','bm-sync','bm-links','pages'].includes(view))return renderResource();if(view==='tokens')return renderTokens();if(view==='text')return renderText();return renderGeneric();}
 
-  function renderGeneric() {
-    const title = appCards.find((item) => item.view === view)?.title || sideByGroup[topGroup].find((item) => item.key === view)?.label || 'Công cụ';
-    const safeAvailable = ['resources', 'queue', 'preset', 'guides', 'oauth', 'crm', 'workflow', 'logs', 'settings'].includes(view);
-    return <div className={styles.panelPage}><div className={styles.pageHead}><div><h1>{title}</h1><p>{safeAvailable ? 'Chức năng cũ vẫn được giữ trong backend/workspace; màn hình đang được gom vào giao diện mới.' : 'Mục này được đưa vào đúng vị trí như EZTOOL. Chỉ bật tự động hóa khi có API chính thức và quyền phù hợp.'}</p></div></div><div className={styles.genericCard}><AppWindow size={40}/><h2>{title}</h2><p>{safeAvailable ? 'Logic hiện có không bị xóa. Bước tiếp theo là đưa form chi tiết cũ vào đúng panel này.' : 'Không dùng cookie/private endpoint để giả lập chức năng. Những thao tác có API công khai sẽ được nối trực tiếp bằng token đã cấp.'}</p></div></div>;
-  }
-
-  function renderMain() {
-    if (view === 'home') return renderHome();
-    if (['ads', 'pixels', 'bm', 'bm-check', 'bm-sync', 'bm-links', 'pages'].includes(view)) return renderResourceView();
-    if (view === 'tokens') return renderTokens();
-    if (view === 'text') return renderText();
-    if (view === 'create-bm') { if (modal !== 'bm') void openBmModal(); return <div className={styles.panelPage}><div className={styles.genericCard}><LoaderCircle className={styles.spin}/><p>Đang mở form tạo BM...</p></div></div>; }
-    return renderGeneric();
-  }
-
-  const sideItems = sideByGroup[topGroup];
-
-  return <div className={styles.app}>
-    <div className={styles.topRail}>{topTabs.map((tab) => <button key={tab.key} className={topGroup === tab.key ? styles.topActive : ''} onClick={() => selectView(tab.view)}>{tab.label}</button>)}<span/><button className={styles.topIcon}><Bell size={18}/></button><button className={styles.topIcon}><Moon size={18}/></button></div>
-    <aside className={`${styles.sidebar} ${collapsed ? styles.sidebarCollapsed : ''}`}>
-      <div className={styles.brand}><span><Zap size={20}/></span>{!collapsed && <div><strong>ADS WORKSPACE</strong><small>Phiên bản nội bộ</small></div>}<button><Upload size={17}/></button></div>
-      {!collapsed && <div className={styles.sideScroll}>{sideItems.map((item, index) => { const Icon = item.icon; return <div key={item.key}>{item.section && <div className={styles.sideSection}>{item.section}</div>}<button className={view === item.key ? styles.sideActive : ''} onClick={() => selectView(item.key)}><span><Icon size={17}/></span><strong>{item.label}</strong></button></div>; })}<div className={styles.sideSection}>KHÁC</div><button onClick={() => selectView('guides')}><span><CircleHelp size={17}/></span><strong>Kênh hỗ trợ</strong></button><button onClick={() => selectView('settings')}><span><Settings size={17}/></span><strong>Cài đặt</strong></button></div>}
-      <div className={styles.collapseArea}><button onClick={() => setCollapsed((value) => !value)}>{collapsed ? <ChevronRight/> : <ChevronLeft/>}{!collapsed && <span>Thu gọn menu</span>}</button></div>
-      {!collapsed && <div className={styles.workspaceBadge}><span>AW</span><div><strong>ADS WORKSPACE</strong><small>{selectedTokenRow?.metaUserName || 'Workspace cá nhân'}</small></div></div>}
-    </aside>
-    <main className={`${styles.main} ${collapsed ? styles.mainCollapsed : ''}`}>
-      <div className={styles.alertStack}>{message && <div className={styles.success}><CheckCircle2 size={16}/>{message}<button onClick={() => setMessage('')}><X size={14}/></button></div>}{error && <div className={styles.error}><AlertTriangle size={16}/>{error}<button onClick={() => setError('')}><X size={14}/></button></div>}</div>
-      {renderMain()}
-    </main>
-
-    {modal !== 'none' && <div className={styles.modalBackdrop} onMouseDown={(event) => { if (event.target === event.currentTarget) setModal('none'); }}><div className={styles.modal}><div className={styles.modalHead}><strong>{modal === 'bm' ? 'Tạo Business Manager' : modal === 'invite' ? 'Thêm người vào BM' : noticeTitle}</strong><button onClick={() => setModal('none')}><X size={18}/></button></div>{modal === 'bm' ? <div className={styles.modalBody}><label>Token<select value={selectedToken} onChange={(event) => setSelectedToken(event.target.value)}><option value="">Chọn token</option>{tokens.map((token) => <option value={token.id} key={token.id}>{token.label} · {statusText[token.status]}</option>)}</select></label><label>Tên BM<input value={bmName} onChange={(event) => setBmName(event.target.value)} placeholder="Nhập tên Business Manager"/></label><label>Page đại diện<select value={bmPage} onChange={(event) => setBmPage(event.target.value)} disabled={bmPreflight}><option value="">{bmPreflight ? 'Đang tải Page...' : 'Chọn Page'}</option>{bmPages.map((page) => <option key={page.id} value={page.id}>{page.name} · {page.id}</option>)}</select></label><div className={styles.modalActions}><button onClick={() => setModal('none')}>Hủy</button><button className={styles.primary} onClick={() => void createBm()} disabled={busy || bmPreflight || !bmPage || !bmName.trim()}>{busy ? <LoaderCircle className={styles.spin}/> : <Plus/>} Tạo BM</button></div></div> : modal === 'invite' ? <div className={styles.modalBody}><label>Business Manager<select value={inviteBusiness} onChange={(event) => setInviteBusiness(event.target.value)}><option value="">Chọn BM</option>{opsBusinesses.map((business) => <option key={business.id} value={business.id}>{business.name} · {business.id}</option>)}</select></label><label>Email<input type="email" value={inviteEmail} onChange={(event) => setInviteEmail(event.target.value)} placeholder="email@example.com"/></label><label>Vai trò<select value={inviteRole} onChange={(event) => setInviteRole(event.target.value as 'ADMIN' | 'EMPLOYEE')}><option value="EMPLOYEE">Employee</option><option value="ADMIN">Admin</option></select></label><div className={styles.modalActions}><button onClick={() => setModal('none')}>Hủy</button><button className={styles.primary} onClick={() => void inviteUser()} disabled={busy || !inviteBusiness || !inviteEmail.trim()}><UserPlus/> Gửi lời mời</button></div></div> : <div className={styles.modalBody}><p className={styles.notice}>{noticeText}</p><div className={styles.modalActions}><button className={styles.primary} onClick={() => setModal('none')}>Đã hiểu</button></div></div>}</div></div>}
-  </div>;
+  const sideItems=sideByGroup[topGroup];
+  return <div className={styles.app}><div className={styles.topRail}>{topTabs.map((tab)=><button key={tab.key} className={topGroup===tab.key?styles.topActive:''} onClick={()=>selectView(tab.view)}>{tab.label}</button>)}<span/><button className={styles.topIcon}><Bell size={18}/></button><button className={styles.topIcon}><Moon size={18}/></button></div><aside className={`${styles.sidebar} ${collapsed?styles.sidebarCollapsed:''}`}><div className={styles.brand}><span><Zap size={20}/></span>{!collapsed&&<div><strong>ADS WORKSPACE</strong><small>Phiên bản nội bộ</small></div>}<button><Upload size={17}/></button></div>{!collapsed&&<div className={styles.sideScroll}>{sideItems.map((item)=>{const Icon=item.icon;return <div key={item.key}>{item.section&&<div className={styles.sideSection}>{item.section}</div>}<button className={view===item.key?styles.sideActive:''} onClick={()=>selectView(item.key)}><span><Icon size={17}/></span><strong>{item.label}</strong></button></div>})}<div className={styles.sideSection}>KHÁC</div><button onClick={()=>selectView('guides')}><span><CircleHelp size={17}/></span><strong>Kênh hỗ trợ</strong></button><button onClick={()=>selectView('settings')}><span><Settings size={17}/></span><strong>Cài đặt</strong></button></div>}<div className={styles.collapseArea}><button onClick={()=>setCollapsed((value)=>!value)}>{collapsed?<ChevronRight/>:<ChevronLeft/>}{!collapsed&&<span>Thu gọn menu</span>}</button></div>{!collapsed&&<div className={styles.workspaceBadge}><span>AW</span><div><strong>ADS WORKSPACE</strong><small>{selectedTokenRow?.metaUserName||'Workspace cá nhân'}</small></div></div>}</aside><main className={`${styles.main} ${collapsed?styles.mainCollapsed:''}`}><div className={styles.alertStack}>{message&&<div className={styles.success}><CheckCircle2 size={16}/>{message}<button onClick={()=>setMessage('')}><X size={14}/></button></div>}{error&&<div className={styles.error}><AlertTriangle size={16}/>{error}<button onClick={()=>setError('')}><X size={14}/></button></div>}</div>{renderMain()}</main>
+  {modal!=='none'&&<div className={styles.modalBackdrop} onMouseDown={(event)=>{if(event.target===event.currentTarget)setModal('none')}}><div className={styles.modal}><div className={styles.modalHead}><strong>{modal==='bm'?'Tạo Business Manager':modal==='invite'?'Thêm người vào BM':noticeTitle}</strong><button onClick={()=>setModal('none')}><X size={18}/></button></div>{modal==='bm'?<div className={styles.modalBody}><label>Token<select value={selectedToken} onChange={(event)=>setSelectedToken(event.target.value)}><option value="">Chọn token</option>{tokens.map((token)=><option value={token.id} key={token.id}>{token.label} · {statusText[token.status]}</option>)}</select></label><label>Tên BM<input value={bmName} onChange={(event)=>setBmName(event.target.value)} placeholder="Nhập tên Business Manager"/></label><label>Page đại diện<select value={bmPage} onChange={(event)=>setBmPage(event.target.value)} disabled={bmPreflight}><option value="">{bmPreflight?'Đang tải Page...':'Chọn Page'}</option>{bmPages.map((page)=><option key={page.id} value={page.id}>{page.name} · {page.id}</option>)}</select></label><div className={styles.modalActions}><button onClick={()=>setModal('none')}>Hủy</button><button className={styles.primary} onClick={()=>void createBm()} disabled={busy||bmPreflight||!bmPage||!bmName.trim()}>{busy?<LoaderCircle className={styles.spin}/>:<Plus/>} Tạo BM</button></div></div>:modal==='invite'?<div className={styles.modalBody}><label>Business Manager<select value={inviteBusiness} onChange={(event)=>setInviteBusiness(event.target.value)}><option value="">Chọn BM</option>{opsBusinesses.map((business)=><option key={business.id} value={business.id}>{business.name} · {business.id}</option>)}</select></label><label>Email<input type="email" value={inviteEmail} onChange={(event)=>setInviteEmail(event.target.value)} placeholder="email@example.com"/></label><label>Vai trò<select value={inviteRole} onChange={(event)=>setInviteRole(event.target.value as 'ADMIN'|'EMPLOYEE')}><option value="EMPLOYEE">Employee</option><option value="ADMIN">Admin</option></select></label><div className={styles.modalActions}><button onClick={()=>setModal('none')}>Hủy</button><button className={styles.primary} onClick={()=>void inviteUser()} disabled={busy||!inviteBusiness||!inviteEmail.trim()}><UserPlus/> Gửi lời mời</button></div></div>:<div className={styles.modalBody}><p className={styles.notice}>{noticeText}</p><div className={styles.modalActions}><button className={styles.primary} onClick={()=>setModal('none')}>Đã hiểu</button></div></div>}</div></div>}</div>
 }
