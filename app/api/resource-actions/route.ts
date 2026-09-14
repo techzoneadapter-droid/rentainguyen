@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { Asset } from '../../../lib/data';
-import { config, list, owner, put } from '../../../lib/server';
+import { list, owner, put } from '../../../lib/server';
 import {
   classifyMetaTokenError,
   getMetaTokenSecret,
