@@ -58,6 +58,7 @@ type TokenRow = {
   metaUserId?: string;
   metaUserName?: string;
   lastError?: string;
+  lastCheckedAt?: string;
   inventory: Inventory | null;
 };
 
@@ -72,7 +73,7 @@ type Billing = {
 };
 
 const STATUS_TEXT: Record<TokenStatus, string> = {
-  active: 'LIVE', invalid: 'DIE', permission_issue: 'Thiếu quyền', rate_limited: 'Rate limit',
+  active: 'LIVE', invalid: 'DIE', permission_issue: 'API từ chối', rate_limited: 'Rate limit',
   create_restricted: 'Giới hạn tạo', unknown_error: 'Chưa kiểm tra',
 };
 
@@ -84,18 +85,28 @@ function metaId(asset: Asset) {
   return asset.metaId || asset.id.match(/meta:(\d{5,30})$/)?.[1] || asset.id.match(/(\d{5,30})$/)?.[1] || '';
 }
 
+function cleanTokenCandidate(value: unknown) {
+  return String(value ?? '')
+    .replace(/^\s*Bearer\s+/i, '')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .replace(/^['"]|['"]$/g, '')
+    .replace(/\s+/g, '')
+    .trim();
+}
+
 function parseTokens(input: string) {
   const out: ImportItem[] = [];
   const seen = new Set<string>();
   const push = (raw: unknown, label?: unknown) => {
-    const token = String(raw ?? '').trim().replace(/^['"]|['"]$/g, '');
-    if (token.length < 20 || token.length > 4096 || /\s/.test(token) || seen.has(token)) return;
+    const token = cleanTokenCandidate(raw);
+    if (token.length < 20 || token.length > 4096 || seen.has(token)) return;
     seen.add(token);
     const clean = String(label ?? '').trim().slice(0, 80);
     out.push({ token, label: clean || undefined });
   };
+
   try {
-    const walk = (value: unknown, label = '') => {
+    const walk = (value: unknown, label = ''): void => {
       if (Array.isArray(value)) return value.forEach((item) => walk(item, label));
       if (!value || typeof value !== 'object') return;
       const row = value as Record<string, unknown>;
@@ -106,17 +117,47 @@ function parseTokens(input: string) {
       }
     };
     walk(JSON.parse(input));
-  } catch { /* text formats below */ }
+  } catch { /* other formats below */ }
+
+  for (const match of input.matchAll(/(?:access_?token|token)\s*[:=]\s*['"]?([^'"\s,;]+)/gi)) push(match[1]);
+  for (const match of input.matchAll(/[?&]access_token=([^&#\s]+)/gi)) push(decodeURIComponent(match[1]));
+
+  let wrapped = '';
+  let wrappedLabel = '';
+  const flushWrapped = () => {
+    if (wrapped) push(wrapped, wrappedLabel || undefined);
+    wrapped = '';
+    wrappedLabel = '';
+  };
+
   input.split(/\r?\n/).forEach((rawLine) => {
     const line = rawLine.trim();
-    if (!line || line.startsWith('#')) return;
-    const url = line.match(/[?&]access_token=([^&#\s]+)/i);
-    if (url) push(decodeURIComponent(url[1]));
-    const named = line.match(/(?:access_?token|token)\s*[:=]\s*['"]?([^'"\s,;]+)/i);
-    if (named) push(named[1]);
-    const parts = line.split(/[|\t,;]/).map((part) => part.trim()).filter(Boolean);
-    if (parts.length > 1) push(parts.at(-1), parts.slice(0, -1).join(' ')); else push(line);
+    if (!line || line.startsWith('#')) { flushWrapped(); return; }
+    if (/[|\t,;:=]/.test(line)) {
+      flushWrapped();
+      const parts = line.split(/[|\t,;]/).map((part) => part.trim()).filter(Boolean);
+      if (parts.length > 1) push(parts.at(-1), parts.slice(0, -1).join(' '));
+      return;
+    }
+    const compact = cleanTokenCandidate(line);
+    if (/^[A-Za-z0-9._-]{20,}$/.test(compact)) {
+      if (!wrapped) {
+        wrapped = compact;
+      } else if (/^EAA/i.test(compact)) {
+        flushWrapped();
+        wrapped = compact;
+      } else if (/^EAA/i.test(wrapped)) {
+        wrapped += compact;
+      } else {
+        flushWrapped();
+        wrapped = compact;
+      }
+    } else {
+      flushWrapped();
+      push(line);
+    }
   });
+  flushWrapped();
   return out;
 }
 
@@ -211,18 +252,8 @@ export default function ResourceConsoleV3() {
     setMode(next); setMessage(''); setError(''); setSelectedIds([]); setSelectedAssetId('');
     if (next !== 'home') {
       setBusy(true);
-      try {
-        const nextTokens = await loadTokens();
-        await loadAssets();
-        if (next === 'create') {
-          const unknown = nextTokens.filter((token) => token.status === 'unknown_error' || !token.inventory).map((token) => token.id).slice(0, 20);
-          if (unknown.length) {
-            setProgress(`Đang tự check ${unknown.length} token chưa có trạng thái…`);
-            await jsonFetch('/api/token-runtime', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'scan', ids: unknown }) });
-            await loadTokens();
-          }
-        }
-      } catch (err) { setError((err as Error).message); }
+      try { await loadAll(); }
+      catch (err) { setError((err as Error).message); }
       finally { setBusy(false); setProgress(''); }
     }
   }
@@ -243,7 +274,7 @@ export default function ResourceConsoleV3() {
 
   async function importCheckAndSync() {
     const items = parseTokens(tokenText);
-    if (!items.length) return setError('Chưa tìm thấy token hợp lệ.');
+    if (!items.length) return setError('Chưa tìm thấy token hợp lệ. Nếu token bị xuống dòng trong extension, cứ dán nguyên khối vào ô này rồi bấm lại.');
     if (items.length > 200) return setError('Mỗi lượt tối đa 200 token.');
     setBusy(true); setError(''); setMessage('');
     try {
@@ -286,6 +317,31 @@ export default function ResourceConsoleV3() {
     finally { setBusy(false); setProgress(''); }
   }
 
+  async function renameToken(token: TokenRow) {
+    const label = window.prompt('Tên mới cho token:', token.label)?.trim();
+    if (!label || label === token.label) return;
+    setBusy(true); setError('');
+    try {
+      const data = await jsonFetch<{ tokens?: TokenRow[]; message?: string }>('/api/token-runtime', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'rename', id: token.id, label }),
+      });
+      setTokens(data.tokens || []); setMessage(data.message || 'Đã sửa token.');
+    } catch (err) { setError((err as Error).message); }
+    finally { setBusy(false); }
+  }
+
+  async function deleteToken(token: TokenRow) {
+    if (!window.confirm(`Xóa token "${token.label}" và tài nguyên đã đồng bộ từ token này?`)) return;
+    setBusy(true); setError('');
+    try {
+      const data = await jsonFetch<{ tokens?: TokenRow[]; message?: string }>('/api/token-runtime', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'delete', ids: [token.id], purgeAssets: true }),
+      });
+      setTokens(data.tokens || []); await loadAssets(); setSelectedIds([]); setSelectedAssetId(''); setMessage(data.message || 'Đã xóa token.');
+    } catch (err) { setError((err as Error).message); }
+    finally { setBusy(false); }
+  }
+
   async function health(ids: string[]) {
     if (!ids.length) return setError('Chưa chọn tài nguyên.');
     setBusy(true); setError('');
@@ -316,10 +372,15 @@ export default function ResourceConsoleV3() {
   }
 
   async function checkCrm() {
+    setBusy(true); setError(''); setMessage('');
     try {
-      const data = await jsonFetch<{ configured?: boolean }>('/api/crm-push', { cache: 'no-store' });
-      setCrmConfigured(Boolean(data.configured));
-    } catch { setCrmConfigured(false); }
+      const data = await jsonFetch<{ configured?: boolean; endpoint?: string }>('/api/crm-push', { cache: 'no-store' });
+      const ready = Boolean(data.configured);
+      setCrmConfigured(ready);
+      setMessage(ready ? `CRM đã kết nối: ${data.endpoint || 'gateway cũ'}` : 'CRM chưa có BVAGC_RESOURCE_API_KEY trong .env.local.');
+    } catch (err) {
+      setCrmConfigured(false); setError((err as Error).message);
+    } finally { setBusy(false); }
   }
 
   async function prepareBm() {
@@ -429,31 +490,39 @@ export default function ResourceConsoleV3() {
   }
 
   function renderDetail() {
-    if (!selectedAsset) return <div style={{ padding: 18, color: '#7d8698', fontSize: 12 }}>Chọn một tài nguyên trong bảng để mở công cụ thật.</div>;
+    const bulkIds = selectedIds.length ? selectedIds : filteredAssets.slice(0, 100).map((asset) => asset.id);
     const token = tokens.find((item) => item.id === effectiveTokenId);
     return <div style={{ padding: 16, display: 'grid', gap: 12 }}>
-      <div><strong>{selectedAsset.name}</strong><div style={{ color: '#8b94a6', fontSize: 10, marginTop: 4 }}>ID {metaId(selectedAsset)} · token {token?.label || 'chưa xác định'}</div></div>
-      <button className={styles.ghost} onClick={() => void health([selectedAsset.id])} disabled={busy}><ShieldCheck size={14}/> Check trạng thái thật</button>
-      <button className={styles.ghost} onClick={() => void pushCrm([selectedAsset.id])} disabled={busy}><Send size={14}/> Đẩy CRM</button>
-      {selectedAsset.type === 'BM' && <>
-        <button className={styles.ghost} onClick={backupBm}><FileUp size={14}/> Backup JSON</button>
-        <div style={{ borderTop: '1px solid #edf1f5', paddingTop: 10 }}><strong style={{ fontSize: 11 }}>Thêm người vào BM</strong></div>
-        <input value={inviteEmail} onChange={(e) => setInviteEmail(e.target.value)} placeholder="email@example.com" style={{ height: 36, border: '1px solid #dfe5ef', borderRadius: 8, padding: '0 9px' }}/>
-        <select value={inviteRole} onChange={(e) => setInviteRole(e.target.value as 'ADMIN'|'EMPLOYEE')} style={{ height: 36, border: '1px solid #dfe5ef', borderRadius: 8, padding: '0 9px', background: '#fff' }}><option value="EMPLOYEE">EMPLOYEE</option><option value="ADMIN">ADMIN</option></select>
-        <button className={styles.ghost} onClick={() => void inviteBusinessUser()} disabled={busy}><UserPlus size={14}/> Gửi lời mời</button>
-      </>}
-      {selectedAsset.type === 'TKQC' && <>
-        <button className={styles.ghost} onClick={() => void readBilling()} disabled={busy}><CreditCard size={14}/> Đọc billing/funding</button>
-        <button className={styles.ghost} onClick={() => void loadCampaigns()} disabled={busy}><Zap size={14}/> Quản lý Campaign</button>
-        {billing && <div style={{ fontSize: 10, lineHeight: 1.7, background: '#f8fafd', padding: 10, borderRadius: 8 }}>Currency: {billing.currency || '—'}<br/>Spent: {billing.amountSpent || '—'}<br/>Balance: {billing.balance || '—'}<br/>Spend cap: {billing.spendCap || '—'}<br/>Funding: {billing.hasFundingSource ? billing.fundingDisplay || billing.fundingType || 'Có' : 'Chưa có'}</div>}
-        {campaigns.length > 0 && <div style={{ display: 'grid', gap: 7 }}>{campaigns.map((camp) => <div key={camp.id} style={{ border: '1px solid #e4e9f2', borderRadius: 8, padding: 9 }}><strong style={{ fontSize: 10 }}>{camp.name}</strong><div style={{ fontSize: 9, color: '#8b94a6', margin: '4px 0' }}>{camp.effectiveStatus || camp.status}</div><div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}><button className={styles.ghost} onClick={() => void changeCampaign(camp.id,'ACTIVE')}>Bật</button><button className={styles.ghost} onClick={() => void changeCampaign(camp.id,'PAUSED')}>Dừng</button><button className={styles.ghost} onClick={() => void changeCampaign(camp.id,'DELETED')}><Trash2 size={12}/> Xóa</button></div></div>)}</div>}
-      </>}
-      {selectedAsset.type === 'Page' && <>
-        <button className={styles.ghost} onClick={() => void loadPageData()} disabled={busy}><RefreshCw size={14}/> Đọc Page & bài viết</button>
-        {pageSummary && <div style={{ fontSize: 10, lineHeight: 1.7, background: '#f8fafd', padding: 10, borderRadius: 8 }}>Followers: {String(pageSummary.followersCount || 0)} · Fans: {String(pageSummary.fanCount || 0)}<br/>Verification: {String(pageSummary.verificationStatus || '—')}</div>}
-        <textarea value={postMessage} onChange={(e) => setPostMessage(e.target.value)} placeholder="Nội dung đăng Page" style={{ minHeight: 80, border: '1px solid #dfe5ef', borderRadius: 8, padding: 9, resize: 'vertical' }}/>
-        <button className={styles.ghost} onClick={() => void publishPagePost()} disabled={busy}><Send size={14}/> Đăng bài</button>
-        {pagePosts.slice(0,10).map((post) => <div key={post.id} style={{ border: '1px solid #e4e9f2', borderRadius: 8, padding: 9, fontSize: 10 }}><div>{post.message || '(không có text)'}</div><button className={styles.ghost} onClick={() => void deletePagePost(post.id)}><Trash2 size={12}/> Xóa bài</button></div>)}
+      <div><strong>Bảng công cụ</strong><div style={{ color: '#8b94a6', fontSize: 10, marginTop: 4 }}>Công cụ thật theo token nguồn. Chọn một dòng để mở thao tác chi tiết.</div></div>
+      <button className={styles.ghost} onClick={() => void health(bulkIds)} disabled={busy || !bulkIds.length}><ShieldCheck size={14}/> Check tài nguyên đang lọc</button>
+      <button className={styles.ghost} onClick={() => selectedToken && void syncToken(selectedToken).then(loadAssets)} disabled={busy || !selectedToken}><RefreshCw size={14}/> Đồng bộ token đang chọn</button>
+      <button className={styles.ghost} onClick={() => void pushCrm(bulkIds)} disabled={busy || !bulkIds.length}><Send size={14}/> Đẩy CRM danh sách đang lọc</button>
+      <div style={{ borderTop: '1px solid #edf1f5', paddingTop: 10 }} />
+      {!selectedAsset && <div style={{ color: '#7d8698', fontSize: 12, lineHeight: 1.6 }}>Chưa chọn tài nguyên. Bảng công cụ vẫn mở sẵn để bạn check all, đồng bộ token hoặc đẩy CRM hàng loạt.</div>}
+      {selectedAsset && <>
+        <div><strong>{selectedAsset.name}</strong><div style={{ color: '#8b94a6', fontSize: 10, marginTop: 4 }}>ID {metaId(selectedAsset)} · token {token?.label || 'chưa xác định'}</div></div>
+        <button className={styles.ghost} onClick={() => void health([selectedAsset.id])} disabled={busy}><ShieldCheck size={14}/> Check trạng thái dòng này</button>
+        <button className={styles.ghost} onClick={() => void pushCrm([selectedAsset.id])} disabled={busy}><Send size={14}/> Đẩy CRM dòng này</button>
+        {selectedAsset.type === 'BM' && <>
+          <button className={styles.ghost} onClick={backupBm}><FileUp size={14}/> Backup JSON</button>
+          <div style={{ borderTop: '1px solid #edf1f5', paddingTop: 10 }}><strong style={{ fontSize: 11 }}>Thêm người vào BM</strong></div>
+          <input value={inviteEmail} onChange={(e) => setInviteEmail(e.target.value)} placeholder="email@example.com" style={{ height: 36, border: '1px solid #dfe5ef', borderRadius: 8, padding: '0 9px' }}/>
+          <select value={inviteRole} onChange={(e) => setInviteRole(e.target.value as 'ADMIN'|'EMPLOYEE')} style={{ height: 36, border: '1px solid #dfe5ef', borderRadius: 8, padding: '0 9px', background: '#fff' }}><option value="EMPLOYEE">EMPLOYEE</option><option value="ADMIN">ADMIN</option></select>
+          <button className={styles.ghost} onClick={() => void inviteBusinessUser()} disabled={busy}><UserPlus size={14}/> Gửi lời mời</button>
+        </>}
+        {selectedAsset.type === 'TKQC' && <>
+          <button className={styles.ghost} onClick={() => void readBilling()} disabled={busy}><CreditCard size={14}/> Đọc billing/funding</button>
+          <button className={styles.ghost} onClick={() => void loadCampaigns()} disabled={busy}><Zap size={14}/> Quản lý Campaign</button>
+          {billing && <div style={{ fontSize: 10, lineHeight: 1.7, background: '#f8fafd', padding: 10, borderRadius: 8 }}>Currency: {billing.currency || '—'}<br/>Spent: {billing.amountSpent || '—'}<br/>Balance: {billing.balance || '—'}<br/>Spend cap: {billing.spendCap || '—'}<br/>Funding: {billing.hasFundingSource ? billing.fundingDisplay || billing.fundingType || 'Có' : 'Chưa có'}</div>}
+          {campaigns.length > 0 && <div style={{ display: 'grid', gap: 7 }}>{campaigns.map((camp) => <div key={camp.id} style={{ border: '1px solid #e4e9f2', borderRadius: 8, padding: 9 }}><strong style={{ fontSize: 10 }}>{camp.name}</strong><div style={{ fontSize: 9, color: '#8b94a6', margin: '4px 0' }}>{camp.effectiveStatus || camp.status}</div><div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}><button className={styles.ghost} onClick={() => void changeCampaign(camp.id,'ACTIVE')}>Bật</button><button className={styles.ghost} onClick={() => void changeCampaign(camp.id,'PAUSED')}>Dừng</button><button className={styles.ghost} onClick={() => void changeCampaign(camp.id,'DELETED')}><Trash2 size={12}/> Xóa</button></div></div>)}</div>}
+        </>}
+        {selectedAsset.type === 'Page' && <>
+          <button className={styles.ghost} onClick={() => void loadPageData()} disabled={busy}><RefreshCw size={14}/> Đọc Page & bài viết</button>
+          {pageSummary && <div style={{ fontSize: 10, lineHeight: 1.7, background: '#f8fafd', padding: 10, borderRadius: 8 }}>Followers: {String(pageSummary.followersCount || 0)} · Fans: {String(pageSummary.fanCount || 0)}<br/>Verification: {String(pageSummary.verificationStatus || '—')}</div>}
+          <textarea value={postMessage} onChange={(e) => setPostMessage(e.target.value)} placeholder="Nội dung đăng Page" style={{ minHeight: 80, border: '1px solid #dfe5ef', borderRadius: 8, padding: 9, resize: 'vertical' }}/>
+          <button className={styles.ghost} onClick={() => void publishPagePost()} disabled={busy}><Send size={14}/> Đăng bài</button>
+          {pagePosts.slice(0,10).map((post) => <div key={post.id} style={{ border: '1px solid #e4e9f2', borderRadius: 8, padding: 9, fontSize: 10 }}><div>{post.message || '(không có text)'}</div><button className={styles.ghost} onClick={() => void deletePagePost(post.id)}><Trash2 size={12}/> Xóa bài</button></div>)}
+        </>}
       </>}
     </div>;
   }
@@ -464,24 +533,24 @@ export default function ResourceConsoleV3() {
       <aside className={styles.sidebar}>
         <div className={styles.sideTitle}><ShieldCheck size={18}/><div><strong>QUẢN LÝ TÀI NGUYÊN</strong><small>BM · ADS · PAGE</small></div></div>
         {(Object.keys(RESOURCE_META) as ResourceTab[]).map((tab) => { const M = RESOURCE_META[tab]; const I = M.icon; const count = tab === 'BM' ? stats.bm : tab === 'TKQC' ? stats.ads : stats.pages; return <button key={tab} className={resourceTab===tab?styles.sideActive:''} onClick={() => { setResourceTab(tab); setSelectedIds([]); setSelectedAssetId(''); }}><span><I size={15}/></span><strong>{M.label}</strong><em>{count}</em><ChevronRight size={13}/></button>; })}
-        <div className={styles.sideNote}>Mỗi nút trong khu vực này gọi backend thật bằng token nguồn của tài nguyên. Không hiển thị chức năng giả.</div>
+        <div className={styles.sideNote}>Group đã bỏ. Khu vực này chỉ quản lý BM, ADS, PAGE và luôn mở bảng công cụ thật bên phải.</div>
       </aside>
       <main className={styles.content}>
         <div className={styles.pageHead}><div><div className={styles.kicker}>RESOURCE MANAGER</div><h2>{meta.label}</h2><p>Đọc và vận hành tài nguyên đã đồng bộ từ token.</p></div><div className={styles.actions}><button className={styles.secondary} onClick={() => void loadAll()}><RefreshCw size={14}/> Làm mới</button><button onClick={() => selectedToken && void syncToken(selectedToken).then(loadAssets)} disabled={!selectedToken||busy}><RefreshCw size={14}/> Đồng bộ token</button></div></div>
         {progress && <div className={styles.progress}><LoaderCircle className={styles.spin} size={14}/>{progress}</div>}{error && <div className={styles.error}>{error}<button onClick={()=>setError('')}><X size={14}/></button></div>}{message && <div className={styles.success}><CheckCircle2 size={14}/>{message}<button onClick={()=>setMessage('')}><X size={14}/></button></div>}
         <div className={styles.toolbar}><div className={styles.search}><Search size={14}/><input value={query} onChange={(e)=>setQuery(e.target.value)} placeholder={`Tìm ${meta.label}...`}/></div><select value={selectedToken} onChange={(e)=>setSelectedToken(e.target.value)}><option value="">Tất cả token</option>{tokens.map((token)=><option key={token.id} value={token.id}>{token.label} · {STATUS_TEXT[token.status]}</option>)}</select><button className={styles.ghost} onClick={()=>void health(selectedIds.length?selectedIds:filteredAssets.slice(0,100).map((a)=>a.id))} disabled={busy||!filteredAssets.length}>Check all</button><button className={styles.ghost} onClick={()=>void pushCrm(selectedIds.length?selectedIds:filteredAssets.slice(0,100).map((a)=>a.id))} disabled={busy||!filteredAssets.length}><Send size={13}/> CRM</button></div>
-        <div style={{ display:'grid', gridTemplateColumns:'minmax(0,1fr) 310px', gap:12 }}>
+        <div style={{ display:'grid', gridTemplateColumns:'minmax(0,1fr) 360px', gap:12 }}>
           <div className={styles.tableCard}><table><thead><tr><th></th><th>Tên</th><th>ID</th><th>Trạng thái</th><th>Chi tiết</th><th>Check gần nhất</th></tr></thead><tbody>{filteredAssets.map((asset)=><tr key={asset.id} onClick={()=>setSelectedAssetId(asset.id)} style={{ cursor:'pointer', background:selectedAssetId===asset.id?'#f4f7ff':undefined }}><td><input type="checkbox" checked={selectedIds.includes(asset.id)} onClick={(e)=>e.stopPropagation()} onChange={(e)=>setSelectedIds((prev)=>e.target.checked?[...prev,asset.id]:prev.filter((id)=>id!==asset.id))}/></td><td><strong>{asset.name}</strong><small>{tokens.find((t)=>t.id===asset.sourceTokenId)?.label || ''}</small></td><td>{metaId(asset)}</td><td><span className={asset.status==='LIVE'||asset.status.includes('Truy cập')?styles.statusLive:asset.status==='DIE'?styles.statusDie:styles.statusWarn}>{asset.status}</span></td><td>{asset.type==='BM'?(asset.verificationStatus||'—'):asset.type==='TKQC'?`${asset.currency||''} ${asset.limit||''}`:asset.healthNote||'—'}</td><td>{asset.checked?new Date(asset.checked).toLocaleString('vi-VN'):'—'}</td></tr>)}</tbody></table>{!filteredAssets.length&&<div className={styles.empty}><Icon size={22}/><strong>Chưa có {meta.label}</strong><span>Nạp/check token rồi đồng bộ tài nguyên.</span></div>}</div>
-          <aside style={{ background:'#fff', border:'1px solid #e0e6ef', borderRadius:12, minHeight:360, overflow:'auto' }}>{renderDetail()}</aside>
+          <aside style={{ background:'#fff', border:'1px solid #e0e6ef', borderRadius:12, minHeight:420, maxHeight:'calc(100vh - 190px)', overflow:'auto' }}>{renderDetail()}</aside>
         </div>
       </main>
     </div>;
   }
 
   function renderTokenTab() {
-    return <><div className={styles.pageHead}><div><div className={styles.kicker}>TOKEN CENTER</div><h2>Nạp token → check → đồng bộ tài nguyên</h2><p>Token được mã hóa phía server. Nạp lại token cũ cũng sẽ mã hóa lại bằng khóa hiện tại để tránh lỗi “chưa kiểm tra”.</p></div><div className={styles.actions}><button className={styles.secondary} onClick={()=>void scanTokens(tokens.map((t)=>t.id))} disabled={busy||!tokens.length}><RefreshCw size={14}/> Check tất cả token</button></div></div>
+    return <><div className={styles.pageHead}><div><div className={styles.kicker}>TOKEN CENTER</div><h2>Nạp token → check → đồng bộ tài nguyên</h2><p>Token được làm sạch xuống dòng/khoảng trắng, mã hóa lại phía server rồi check thật. Token dán từ extension bị tự xuống dòng sẽ được nối lại.</p></div><div className={styles.actions}><button className={styles.secondary} onClick={()=>void scanTokens(tokens.map((t)=>t.id))} disabled={busy||!tokens.length}><RefreshCw size={14}/> Check tất cả token</button></div></div>
       <div className={styles.tokenImport}><div><label>Token / danh sách token</label><textarea value={tokenText} onChange={(e)=>setTokenText(e.target.value)} placeholder="Dán token, tên|token, CSV, JSON hoặc access_token=..."/></div><label className={styles.fileBox}><input ref={fileInputRef} type="file" onChange={(e)=>void onTokenFile(e.target.files?.[0]||null)}/><FileUp size={28}/><strong>{fileName||'Chọn file token'}</strong><span>Mọi file text; UTF-8/UTF-16.</span></label><button onClick={()=>void importCheckAndSync()} disabled={busy}><BadgeCheck size={15}/>{busy?'Đang xử lý…':'Nạp + Check + Đồng bộ'}</button></div>
-      <div className={styles.tokenList}><div className={styles.sectionHead}><div><strong>Kho token</strong><span>{tokens.length} token · {liveTokens.length} LIVE</span></div></div>{tokens.map((token)=><div className={styles.tokenRow} key={token.id}><div className={styles.tokenName}><span className={token.status==='active'?styles.liveDot:styles.deadDot}/><div><strong>{token.metaUserName?`${token.metaUserName} - ${token.metaUserId||''}`:token.label}</strong><small>{token.lastError||token.inventory?.warnings?.[0]||'Đã đọc user/permissions/tài nguyên khi check.'}</small></div></div><span className={token.status==='active'?styles.statusLive:token.status==='invalid'?styles.statusDie:styles.statusWarn}>{STATUS_TEXT[token.status]}</span><div className={styles.resourceMini}><span>BM <b>{token.inventory?.businessCount||0}</b></span><span>ADS <b>{token.inventory?.adAccountCount||0}</b></span><span>Page <b>{token.inventory?.pageCount||0}</b></span></div><button className={styles.ghost} onClick={()=>void scanTokens([token.id])} disabled={busy}><ShieldCheck size={13}/> Check token</button></div>)}</div></>;
+      <div className={styles.tokenList}><div className={styles.sectionHead}><div><strong>Kho token</strong><span>{tokens.length} token · {liveTokens.length} LIVE</span></div></div>{tokens.map((token)=><div className={styles.tokenRow} key={token.id}><div className={styles.tokenName}><span className={token.status==='active'?styles.liveDot:styles.deadDot}/><div><strong>{token.metaUserName?`${token.metaUserName} - ${token.metaUserId||''}`:token.label}</strong><small>{token.lastError||token.inventory?.warnings?.[0]||'Đã đọc user/permissions/tài nguyên khi check.'}</small></div></div><span className={token.status==='active'?styles.statusLive:token.status==='invalid'?styles.statusDie:styles.statusWarn}>{STATUS_TEXT[token.status]}</span><div className={styles.resourceMini}><span>BM <b>{token.inventory?.businessCount||0}</b></span><span>ADS <b>{token.inventory?.adAccountCount||0}</b></span><span>Page <b>{token.inventory?.pageCount||0}</b></span></div><div style={{display:'flex',gap:6,justifyContent:'flex-end',flexWrap:'wrap'}}><button className={styles.ghost} onClick={()=>void scanTokens([token.id])} disabled={busy}><ShieldCheck size={13}/> Check</button><button className={styles.ghost} onClick={()=>void renameToken(token)} disabled={busy}>Sửa</button><button className={styles.ghost} onClick={()=>void deleteToken(token)} disabled={busy}><Trash2 size={13}/> Xóa</button></div></div>)}</div></>;
   }
 
   function renderBmCreate() {
@@ -490,14 +559,14 @@ export default function ResourceConsoleV3() {
   }
 
   function renderCrm() {
-    return <><div className={styles.pageHead}><div><div className={styles.kicker}>CCRM / CRM</div><h2>Liên kết CRM</h2><p>Dùng lại gateway CRM cũ của app. BM, ADS và Page được đẩy qua /api/crm-push.</p></div><div className={styles.actions}><button className={styles.secondary} onClick={()=>void checkCrm()}><RefreshCw size={14}/> Kiểm tra kết nối</button></div></div><div className={styles.formCard}><div className={styles.permissionStrip}><span className={crmConfigured===true?styles.statusLive:styles.statusWarn}>{crmConfigured===null?'Chưa kiểm tra':crmConfigured?'CRM đã cấu hình':'Chưa có API key CRM'}</span></div><p style={{fontSize:11,color:'#6b7488'}}>CRM hiện nhận BM, TKQC và Page có Meta ID. Sau khi token được check/sync, bạn có thể đẩy tài nguyên từ Quản lý tài nguyên hoặc đẩy toàn bộ bên dưới.</p><button onClick={()=>void pushCrm(assets.filter((a)=>['BM','TKQC','Page'].includes(a.type)).slice(0,100).map((a)=>a.id))} disabled={busy||!assets.length}><Send size={14}/> Đẩy tối đa 100 tài nguyên hiện có</button></div></>;
+    return <><div className={styles.pageHead}><div><div className={styles.kicker}>CCRM / CRM</div><h2>Liên kết CRM</h2><p>Dùng lại gateway CRM cũ của app. BM, ADS và Page được đẩy qua /api/crm-push.</p></div><div className={styles.actions}><button className={styles.secondary} onClick={()=>void checkCrm()} disabled={busy}><RefreshCw size={14}/> Kiểm tra kết nối</button></div></div><div className={styles.formCard}><div className={styles.permissionStrip}><span className={crmConfigured===true?styles.statusLive:styles.statusWarn}>{crmConfigured===null?'Chưa kiểm tra':crmConfigured?'CRM đã cấu hình':'Chưa có API key CRM'}</span></div><p style={{fontSize:11,color:'#6b7488'}}>CRM hiện nhận BM, TKQC và Page có Meta ID. Sau khi token được check/sync, bạn có thể đẩy tài nguyên từ Quản lý tài nguyên hoặc đẩy toàn bộ bên dưới.</p><button onClick={()=>void pushCrm(assets.filter((a)=>['BM','TKQC','Page'].includes(a.type)).slice(0,100).map((a)=>a.id))} disabled={busy||!assets.length}><Send size={14}/> Đẩy tối đa 100 tài nguyên hiện có</button></div></>;
   }
 
   function renderCreate() {
-    return <div className={styles.workspace}><aside className={styles.sidebar}><div className={styles.sideTitle}><Plus size={18}/><div><strong>TẠO TÀI NGUYÊN</strong><small>Token & logic app cũ đã gom lại</small></div></div><button className={createTab==='token'?styles.sideActive:''} onClick={()=>setCreateTab('token')}><span><KeyRound size={15}/></span><strong>Nạp & check token</strong><ChevronRight size={13}/></button><button className={createTab==='bm'?styles.sideActive:''} onClick={()=>setCreateTab('bm')}><span><Building2 size={15}/></span><strong>Tạo BM từ token</strong><ChevronRight size={13}/></button><button className={createTab==='crm'?styles.sideActive:''} onClick={()=>{setCreateTab('crm');void checkCrm();}}><span><Send size={15}/></span><strong>Liên kết CRM</strong><ChevronRight size={13}/></button><div className={styles.sideNote}>Không còn “Toàn bộ logic app cũ”. Các logic thật được đưa vào đúng màn hình; module không dùng sẽ không chạy nền.</div></aside><main className={styles.content}>{progress&&<div className={styles.progress}><LoaderCircle className={styles.spin} size={14}/>{progress}</div>}{error&&<div className={styles.error}>{error}<button onClick={()=>setError('')}><X size={14}/></button></div>}{message&&<div className={styles.success}><CheckCircle2 size={14}/>{message}<button onClick={()=>setMessage('')}><X size={14}/></button></div>}{createTab==='token'?renderTokenTab():createTab==='bm'?renderBmCreate():renderCrm()}</main></div>;
+    return <div className={styles.workspace}><aside className={styles.sidebar}><div className={styles.sideTitle}><Plus size={18}/><div><strong>TẠO TÀI NGUYÊN</strong><small>Token & CRM</small></div></div><button className={createTab==='token'?styles.sideActive:''} onClick={()=>setCreateTab('token')}><span><KeyRound size={15}/></span><strong>Nạp & check token</strong><ChevronRight size={13}/></button><button className={createTab==='bm'?styles.sideActive:''} onClick={()=>setCreateTab('bm')}><span><Building2 size={15}/></span><strong>Tạo BM từ token</strong><ChevronRight size={13}/></button><button className={createTab==='crm'?styles.sideActive:''} onClick={()=>{setCreateTab('crm');}}><span><Send size={15}/></span><strong>Liên kết CRM</strong><ChevronRight size={13}/></button><div className={styles.sideNote}>Không còn mục logic cũ rời rạc. Logic thật được đưa vào đúng màn hình; module không dùng sẽ không chạy nền.</div></aside><main className={styles.content}>{progress&&<div className={styles.progress}><LoaderCircle className={styles.spin} size={14}/>{progress}</div>}{error&&<div className={styles.error}>{error}<button onClick={()=>setError('')}><X size={14}/></button></div>}{message&&<div className={styles.success}><CheckCircle2 size={14}/>{message}<button onClick={()=>setMessage('')}><X size={14}/></button></div>}{createTab==='token'?renderTokenTab():createTab==='bm'?renderBmCreate():renderCrm()}</main></div>;
   }
 
-  if (mode === 'home') return <div className={styles.shell}><TopBar mode={mode} live={liveTokens.length} total={tokens.length} onMode={(next)=>void openMode(next)}/><main className={styles.home}><section className={styles.hero}><div className={styles.kicker}>ADS WORKSPACE</div><h1>Token → tài nguyên → vận hành thật</h1><p>Nạp token một lần, app check LIVE/DIE và quyền, đồng bộ BM/ADS/Page, rồi mở đúng công cụ quản lý thực tế. CRM cũ được nối lại, còn module giả/không có backend đã bị loại.</p><div className={styles.heroActions}><button onClick={()=>void openMode('create')}><Plus size={15}/> Nạp token</button><button className={styles.secondary} onClick={()=>void openMode('manage')}><ShieldCheck size={15}/> Quản lý tài nguyên</button></div></section><div className={styles.flowGrid}><article><KeyRound size={18}/><strong>1. Check token</strong><span>/me thành công = LIVE; quyền/tài nguyên phụ được đọc riêng, không làm token LIVE thành DIE chỉ vì thiếu một scope.</span></article><article><Building2 size={18}/><strong>2. Gom tài nguyên</strong><span>BM, tài khoản quảng cáo, Page được đồng bộ và gắn đúng token nguồn.</span></article><article><Sparkles size={18}/><strong>3. Vận hành</strong><span>Check health, invite BM user, billing, campaign, Page post và CRM đều gọi backend thật.</span></article></div></main></div>;
+  if (mode === 'home') return <div className={styles.shell}><TopBar mode={mode} live={liveTokens.length} total={tokens.length} onMode={(next)=>void openMode(next)}/><main className={styles.home}><section className={styles.hero}><div className={styles.kicker}>ADS WORKSPACE</div><h1>Token → tài nguyên → vận hành thật</h1><p>Nạp token một lần, app check LIVE/DIE và quyền, đồng bộ BM/ADS/Page, rồi mở đúng công cụ quản lý thực tế. CRM cũ được nối lại, còn module giả/không có backend đã bị loại.</p><div className={styles.heroActions}><button onClick={()=>void openMode('create')}><Plus size={15}/> Nạp token</button><button className={styles.secondary} onClick={()=>void openMode('manage')}><ShieldCheck size={15}/> Quản lý tài nguyên</button></div></section><div className={styles.flowGrid}><article><KeyRound size={18}/><strong>1. Check token</strong><span>/me thành công = LIVE. Token bị extension làm xuống dòng sẽ được nối lại trước khi gửi backend.</span></article><article><Building2 size={18}/><strong>2. Gom tài nguyên</strong><span>BM, tài khoản quảng cáo, Page được đồng bộ và gắn đúng token nguồn.</span></article><article><Sparkles size={18}/><strong>3. Vận hành</strong><span>Check health, invite BM user, billing, campaign, Page post và CRM đều gọi backend thật.</span></article></div></main></div>;
   return <div className={styles.shell}><TopBar mode={mode} live={liveTokens.length} total={tokens.length} onMode={(next)=>void openMode(next)}/>{mode==='manage'?renderManage():renderCreate()}</div>;
 }
 
