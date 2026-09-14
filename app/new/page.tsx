@@ -1,5 +1,5 @@
-import UnifiedMetaWorkspace from '../unified-meta-workspace';
+import ResourceConsoleV3 from '../resource-console-v3';
 
 export default function NewDashboardPage() {
-  return <UnifiedMetaWorkspace />;
+  return <ResourceConsoleV3 />;
 }
