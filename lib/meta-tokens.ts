@@ -209,41 +209,32 @@ export function classifyMetaTokenError(error: unknown): {
   const lower = rawMessage.toLowerCase();
   const code = error instanceof MetaTokenError ? error.code : undefined;
   const subcode = error instanceof MetaTokenError ? error.subcode : undefined;
+  const clearlyExpired = /expired|invalidated|changed their password|session has expired|token has expired|access token.*expired|invalid oauth/.test(lower);
+  const apiContextRejected =
+    code === 1 ||
+    ([100, 190].includes(code || -1) && /error loading application|invalid request|cannot load application|application.*load/.test(lower));
 
   let status: MetaTokenStatus = 'unknown_error';
-  if (
-    code === 190 &&
-    /error loading application|invalid request/.test(lower) &&
-    !/expired|invalidated|changed their password|session has expired|token has expired/.test(lower)
-  ) {
+  if (apiContextRejected && !clearlyExpired) {
     status = 'permission_issue';
-  } else if (
-    code === 190 ||
-    /access token.*(invalid|expired)|invalid oauth|session.*expired|token.*expired/.test(lower)
-  ) {
+  } else if (code === 190 || /access token.*(invalid|expired)|invalid oauth|session.*expired|token.*expired/.test(lower)) {
     status = 'invalid';
-  } else if (
-    [4, 17, 32, 613].includes(code || -1) ||
-    /rate limit|too many calls|request limit/.test(lower)
-  ) {
+  } else if ([4, 17, 32, 613].includes(code || -1) || /rate limit|too many calls|request limit/.test(lower)) {
     status = 'rate_limited';
   } else if (
     subcode === 1690114 ||
     /đã đạt giới hạn số doanh nghiệp|giới hạn số doanh nghiệp|business.*(limit|maximum|too many|cannot create|can't create|not eligible)|(limit|maximum).*business|reached.*business|create.*business.*restricted|not eligible.*business/.test(lower)
   ) {
     status = 'create_restricted';
-  } else if (
-    [10, 200].includes(code || -1) ||
-    /permission|not authorized|requires.*access|insufficient.*access/.test(lower)
-  ) {
+  } else if ([10, 200].includes(code || -1) || /permission|not authorized|requires.*access|insufficient.*access/.test(lower)) {
     status = 'permission_issue';
   }
 
   let reason = rawMessage;
   if (subcode === 1690114) {
     reason = `${rawMessage}. Tài khoản Meta đứng sau token hiện đã đạt giới hạn tạo Business. Token vẫn có thể dùng cho các thao tác được Meta cho phép; app sẽ không tự retry hoặc tự chuyển token.`;
-  } else if (status === 'permission_issue' && code === 190) {
-    reason = `${rawMessage}. Token này không bị app kết luận là DIE; Meta đang từ chối app/API context hiện tại. Hãy nạp lại token dạng Graph API/User token nếu cần đọc tài nguyên bằng backend.`;
+  } else if (status === 'permission_issue' && (code === 1 || code === 190 || code === 100)) {
+    reason = `${rawMessage}. App không kết luận token này là DIE. Meta đang từ chối bối cảnh gọi API hiện tại; token dạng extension/session có thể còn chạy trong Ads Manager nhưng không dùng được cho backend token-only.`;
   }
 
   return { status, reason, code, subcode };
