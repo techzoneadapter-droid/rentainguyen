@@ -8,7 +8,6 @@ import {
   graphWithToken,
   publicToken,
   tokenFingerprint,
-  updateMetaToken,
   type MetaTokenRecord,
   type MetaTokenStatus,
 } from '../../../lib/meta-tokens';
@@ -266,17 +265,36 @@ export async function POST(req: Request) {
         } else {
           reused += 1;
         }
-        inventories.push(await scanToken(workspaceOwner, record, item.token));
+        const now = new Date().toISOString();
+        const inventory: TokenInventory = {
+          id: inventoryId(workspaceOwner, record.id),
+          tokenId: record.id,
+          status: record.status,
+          permissions: [],
+          businessCount: 0,
+          verifiedBusinessCount: 0,
+          pageCount: 0,
+          adAccountCount: 0,
+          liveAdCount: 0,
+          dieAdCount: 0,
+          restrictedAdCount: 0,
+          totalResources: 0,
+          warnings: ['Đã lưu local. Chưa gọi Meta Graph API.'],
+          scannedAt: now,
+          created: now,
+        };
+        await put(workspaceOwner, 'token-inventory', inventory).run();
+        inventories.push(inventory);
       }
 
-      await audit(workspaceOwner, `Nhập hàng loạt token: mới ${imported}, đã có ${reused}`).run();
+      await audit(workspaceOwner, `Nhập token local: mới ${imported}, đã có ${reused} • không gọi Graph`).run();
       return Response.json({
         imported,
         reused,
         processed: input.items.length,
         inventories,
         tokens: await joinedRows(workspaceOwner),
-        message: `Đã xử lý ${input.items.length} token: thêm mới ${imported}, dùng lại ${reused}.`,
+        message: `Đã lưu ${input.items.length} token trong workspace. Không gọi Graph API.`,
       });
     }
 
