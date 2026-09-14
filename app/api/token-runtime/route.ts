@@ -430,31 +430,11 @@ export async function POST(req: Request) {
         }
         await put(workspaceOwner, 'meta-token', record).run();
         byFingerprint.set(fingerprint, record);
-        const now = new Date().toISOString();
-        const inventory: TokenInventory = {
-          id: inventoryId(workspaceOwner, record.id),
-          tokenId: record.id,
-          status: record.status,
-          permissions: [],
-          businessCount: 0,
-          verifiedBusinessCount: 0,
-          pageCount: 0,
-          adAccountCount: 0,
-          liveAdCount: 0,
-          dieAdCount: 0,
-          restrictedAdCount: 0,
-          pixelCount: 0,
-          totalResources: 0,
-          warnings: ['Đã lưu local. Chưa gọi Meta Graph API. Bấm check/scan khi bạn chủ động cần.'],
-          scannedAt: now,
-          created: now,
-        };
-        await put(workspaceOwner, 'token-inventory', inventory).run();
-        inventories.push(inventory);
+        inventories.push(await scanToken(workspaceOwner, record, token));
       }
 
-      await audit(workspaceOwner, `Nạp token local: mới ${imported}, dùng lại ${reused} • không gọi Graph`).run();
-      return Response.json({ imported, reused, processed: input.items.length, inventories, tokens: await joinedRows(workspaceOwner), message: `Đã lưu ${input.items.length} token trong workspace. Không gọi Graph API.` });
+      await audit(workspaceOwner, `Nạp và check token: mới ${imported}, dùng lại ${reused}`).run();
+      return Response.json({ imported, reused, processed: input.items.length, inventories, tokens: await joinedRows(workspaceOwner), message: `Đã nạp và check ${input.items.length} token.` });
     }
 
     for (const id of input.ids) {
