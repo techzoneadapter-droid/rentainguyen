@@ -212,6 +212,12 @@ export function classifyMetaTokenError(error: unknown): {
 
   let status: MetaTokenStatus = 'unknown_error';
   if (
+    code === 190 &&
+    /error loading application|invalid request/.test(lower) &&
+    !/expired|invalidated|changed their password|session has expired|token has expired/.test(lower)
+  ) {
+    status = 'permission_issue';
+  } else if (
     code === 190 ||
     /access token.*(invalid|expired)|invalid oauth|session.*expired|token.*expired/.test(lower)
   ) {
@@ -236,6 +242,8 @@ export function classifyMetaTokenError(error: unknown): {
   let reason = rawMessage;
   if (subcode === 1690114) {
     reason = `${rawMessage}. Tài khoản Meta đứng sau token hiện đã đạt giới hạn tạo Business. Token vẫn có thể dùng cho các thao tác được Meta cho phép; app sẽ không tự retry hoặc tự chuyển token.`;
+  } else if (status === 'permission_issue' && code === 190) {
+    reason = `${rawMessage}. Token này không bị app kết luận là DIE; Meta đang từ chối app/API context hiện tại. Hãy nạp lại token dạng Graph API/User token nếu cần đọc tài nguyên bằng backend.`;
   }
 
   return { status, reason, code, subcode };
