@@ -21,6 +21,7 @@ export type Asset = {
  primaryPageName?:string;
  createdById?:string;
  createdByName?:string;
+ sourceTokenId?:string;
  adminEmail?:string;
  adminInviteStatus?:string;
  adminInviteError?:string;

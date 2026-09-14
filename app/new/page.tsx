@@ -1,11 +1,5 @@
-import EztoolCloneDashboard from '../eztool-clone-dashboard';
-import ResourceWorkspaceBridge from '../resource-workspace-bridge';
+import UnifiedMetaWorkspace from '../unified-meta-workspace';
 
 export default function NewDashboardPage() {
-  return (
-    <>
-      <EztoolCloneDashboard />
-      <ResourceWorkspaceBridge />
-    </>
-  );
+  return <UnifiedMetaWorkspace />;
 }
