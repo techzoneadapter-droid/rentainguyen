@@ -1,19 +1,40 @@
+import { env } from 'cloudflare:workers';
 import { z } from 'zod';
 import type { Asset } from '../../../lib/data';
 import { audit, db, list, owner, put } from '../../../lib/server';
 
+const DEFAULT_GATEWAY = 'https://zcxoennnjizibvzokwaz.supabase.co/functions/v1/resource-supply-gateway';
+
 const pushSchema = z.object({
-  metaIds: z.array(z.string().regex(/^\\d{5,30}$/)).min(1).max(100),
+  metaIds: z.array(z.string().regex(/^\d{5,30}$/)).min(1).max(100),
 });
+
+type GatewayResult = {
+  ok?: boolean;
+  status?: string;
+  batch_id?: string;
+  accepted?: Array<{ index: number; type: string; meta_id: string; action: string; id: string }>;
+  rejected?: Array<{ index: number; error: string }>;
+  error?: string;
+  message?: string;
+};
 
 function sameOrigin(req: Request) {
   const origin = req.headers.get('origin');
   return !origin || origin === new URL(req.url).origin;
 }
 
+function runtimeConfig() {
+  const runtime = env as unknown as Record<string, string | undefined>;
+  return {
+    apiKey: runtime.BVAGC_RESOURCE_API_KEY || process.env.BVAGC_RESOURCE_API_KEY || '',
+    gateway: runtime.BVAGC_RESOURCE_GATEWAY_URL || process.env.BVAGC_RESOURCE_GATEWAY_URL || DEFAULT_GATEWAY,
+  };
+}
+
 function metaId(asset: Asset) {
-  if (asset.metaId && /^\\d{5,30}$/.test(asset.metaId)) return asset.metaId;
-  const match = asset.id.match(/(?:^|:)meta:(\\d{5,30})(?:$|:)/) || asset.id.match(/(\\d{5,30})$/);
+  if (asset.metaId && /^\d{5,30}$/.test(asset.metaId)) return asset.metaId;
+  const match = asset.id.match(/(?:^|:)meta:(\d{5,30})(?:$|:)/) || asset.id.match(/(\d{5,30})$/);
   return match?.[1] || '';
 }
 
@@ -25,21 +46,21 @@ function gatewayType(asset: Asset) {
 
 function technicalStatus(status: string) {
   const value = String(status || '').toLowerCase();
-  if (status === 'LIVE' || value.includes('truy cập') || value.includes('truy cáº­p')) return 'LIVE';
+  if (status === 'LIVE' || value.includes('truy cập')) return 'LIVE';
   if (status === 'DIE' || value.includes('disabled') || value.includes('vô hiệu')) return 'DISABLED';
-  if (value.includes('hạn chế') || value.includes('háº¡n cháº¿') || value.includes('restricted')) return 'RESTRICTED';
-  if (value.includes('cần kiểm tra quyền') || value.includes('cáº§n kiá»ƒm tra quyá»n') || value.includes('access lost')) return 'ACCESS_LOST';
+  if (value.includes('hạn chế') || value.includes('restricted')) return 'RESTRICTED';
+  if (value.includes('cần kiểm tra quyền') || value.includes('access lost')) return 'ACCESS_LOST';
   return 'UNKNOWN';
 }
 
 function numericTier(tier: string) {
-  const match = String(tier || '').match(/^BM(\\d+)$/i);
+  const match = String(tier || '').match(/^BM(\d+)$/i);
   return match ? Number(match[1]) : undefined;
 }
 
 function cleanCountry(country: string) {
   const value = String(country || '').trim();
-  if (!value || value.toLowerCase().includes('chưa') || value.toLowerCase().includes('chÆ°a')) return undefined;
+  if (!value || value.toLowerCase().includes('chưa')) return undefined;
   return value;
 }
 
@@ -71,7 +92,7 @@ function toGatewayResource(asset: Asset) {
       : asset.verified
         ? 'VERIFIED'
         : 'UNVERIFIED';
-    if (/^BM\\d+$/i.test(String(asset.tier || ''))) base.bm_type = asset.tier;
+    if (/^BM\d+$/i.test(String(asset.tier || ''))) base.bm_type = asset.tier;
     const limit = numericTier(asset.tier);
     if (limit !== undefined) base.account_limit = limit;
     base.operation_region = cleanCountry(asset.country);
@@ -87,9 +108,11 @@ function toGatewayResource(asset: Asset) {
 }
 
 export async function GET() {
+  const connection = runtimeConfig();
   return Response.json({
-    configured: true,
-    endpoint: 'local-workspace',
+    configured: Boolean(connection.apiKey),
+    endpoint: connection.gateway,
+    mode: connection.apiKey ? 'external-gateway' : 'not-configured',
   });
 }
 
@@ -99,6 +122,14 @@ export async function POST(req: Request) {
   }
 
   try {
+    const connection = runtimeConfig();
+    if (!connection.apiKey) {
+      return Response.json(
+        { error: 'Chưa cấu hình BVAGC_RESOURCE_API_KEY. Hãy tạo khóa kết nối trong BVAGC CRM rồi lưu khóa ở server của app nguồn.' },
+        { status: 503 },
+      );
+    }
+
     const input = pushSchema.parse(await req.json());
     const workspaceOwner = await owner();
     const assets = (await list(workspaceOwner, 'asset')) as Asset[];
@@ -114,35 +145,52 @@ export async function POST(req: Request) {
       throw new Error('CRM hiện chỉ nhận BM, tài khoản quảng cáo và Page có Meta ID hợp lệ.');
     }
 
-    const batchId = `local-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
+    const batchId = `ads-workspace-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
+    const response = await fetch(connection.gateway, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-bvagc-api-key': connection.apiKey,
+      },
+      body: JSON.stringify({ batch_id: batchId, resources: mapped.map((item) => item.resource) }),
+      signal: AbortSignal.timeout(25000),
+    });
+
+    const result = (await response.json().catch(() => ({ ok: false, error: 'INVALID_GATEWAY_RESPONSE' }))) as GatewayResult;
+    if (!response.ok || !result.ok) {
+      throw new Error(result.message || result.error || `CRM gateway HTTP ${response.status}`);
+    }
+
+    const acceptedByMeta = new Map((result.accepted || []).map((item) => [item.meta_id, item]));
     const now = new Date().toISOString();
-    const accepted = mapped.map(({ asset }, index) => ({
-      index,
-      type: gatewayType(asset),
-      meta_id: metaId(asset),
-      action: 'LOCAL_ONLY',
-      id: `local:${metaId(asset)}`,
-    }));
-    const updates = mapped.map(({ asset }) => put(workspaceOwner, 'asset', {
-      ...asset,
-      crmPushStatus: 'LOCAL_ONLY',
-      crmPushAt: now,
-      crmResourceId: `local:${metaId(asset)}`,
-      crmBatchId: batchId,
-    }));
+    const updates = mapped
+      .filter(({ asset }) => acceptedByMeta.has(metaId(asset)))
+      .map(({ asset }) => {
+        const accepted = acceptedByMeta.get(metaId(asset));
+        return put(workspaceOwner, 'asset', {
+          ...asset,
+          crmPushStatus: accepted?.action || 'ACCEPTED',
+          crmPushAt: now,
+          crmResourceId: accepted?.id || '',
+          crmBatchId: batchId,
+        });
+      });
 
     await db().batch([
       ...updates,
-      audit(workspaceOwner, `Lưu CRM local ${mapped.length} tài nguyên · batch ${batchId} • không gửi ra ngoài`),
+      audit(
+        workspaceOwner,
+        `Push BVAGC CRM: ${result.accepted?.length || 0} thành công, ${result.rejected?.length || 0} lỗi · batch ${batchId}`,
+      ),
     ]);
 
     return Response.json({
       ok: true,
-      status: 'LOCAL_ONLY',
+      status: result.status,
       batchId,
-      accepted,
-      rejected: [],
-      message: `Đã lưu ${mapped.length} tài nguyên trong workspace. Không đẩy dữ liệu ra CRM/gateway bên ngoài.`,
+      accepted: result.accepted || [],
+      rejected: result.rejected || [],
+      message: `Đã gửi ${result.accepted?.length || 0}/${mapped.length} tài nguyên tới BVAGC CRM. Giá bán và trạng thái thương mại do CRM quản lý, app nguồn chỉ đồng bộ dữ liệu kỹ thuật.`,
     });
   } catch (error) {
     if (error instanceof z.ZodError) {

@@ -20,16 +20,22 @@ export default defineConfig(async ({ mode }) => {
   process.env.MINIFLARE_REGISTRY_PATH ??= ".wrangler/registry";
 
   const appEnv = loadEnv(mode, process.cwd(), "");
+  const envValue = (name: string, fallback = "") =>
+    appEnv[name] || process.env[name] || fallback;
+
   const localBindingConfig = {
     main: "vinext/server/fetch-handler",
     compatibility_flags: ["nodejs_compat"],
     vars: {
-      META_ACCESS_TOKEN:
-        appEnv.META_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN || "",
-      META_API_VERSION:
-        appEnv.META_API_VERSION || process.env.META_API_VERSION || "v26.0",
-      TOKEN_ENCRYPTION_KEY:
-        appEnv.TOKEN_ENCRYPTION_KEY || process.env.TOKEN_ENCRYPTION_KEY || "",
+      META_ACCESS_TOKEN: envValue("META_ACCESS_TOKEN"),
+      META_API_VERSION: envValue("META_API_VERSION", "v26.0"),
+      META_APP_ID: envValue("META_APP_ID"),
+      META_APP_SECRET: envValue("META_APP_SECRET"),
+      META_OAUTH_REDIRECT_URI: envValue("META_OAUTH_REDIRECT_URI"),
+      TOKEN_ENCRYPTION_KEY: envValue("TOKEN_ENCRYPTION_KEY"),
+      BVAGC_RESOURCE_GATEWAY_URL: envValue("BVAGC_RESOURCE_GATEWAY_URL"),
+      BVAGC_RESOURCE_API_KEY: envValue("BVAGC_RESOURCE_API_KEY"),
+      BVAGC_GUIDE_GATEWAY_URL: envValue("BVAGC_GUIDE_GATEWAY_URL"),
     },
     d1_databases: d1
       ? [

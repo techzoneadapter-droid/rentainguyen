@@ -8,10 +8,22 @@ type OAuthTokenBody = {
   error?: { message?: string; code?: number; error_subcode?: number };
 };
 
-export const META_OAUTH_SCOPES = [
+export const META_OAUTH_REQUIRED_SCOPES = [
   'business_management',
   'pages_show_list',
   'pages_read_engagement',
+] as const;
+
+export const META_OAUTH_ACTION_SCOPES = [
+  'ads_read',
+  'ads_management',
+  'pages_manage_posts',
+  'pages_manage_metadata',
+] as const;
+
+export const META_OAUTH_SCOPES = [
+  ...META_OAUTH_REQUIRED_SCOPES,
+  ...META_OAUTH_ACTION_SCOPES,
 ] as const;
 
 function workerEnv() {
