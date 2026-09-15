@@ -1,6 +1,7 @@
 import { audit, db, owner, put } from '../../../../lib/server';
 import {
-  META_OAUTH_SCOPES,
+  META_OAUTH_ACTION_SCOPES,
+  META_OAUTH_REQUIRED_SCOPES,
   exchangeForLongLivedMetaToken,
   exchangeMetaOAuthCode,
 } from '../../../../lib/meta-oauth';
@@ -90,10 +91,12 @@ export async function GET(req: Request) {
         .filter((item) => String(item.status || '') === 'granted')
         .map((item) => String(item.permission || '')),
     );
-    const missing = META_OAUTH_SCOPES.filter((scope) => !granted.has(scope));
-    if (missing.length) {
-      throw new Error(`Tài khoản chưa cấp đủ quyền cần thiết: ${missing.join(', ')}.`);
+
+    const missingRequired = META_OAUTH_REQUIRED_SCOPES.filter((scope) => !granted.has(scope));
+    if (missingRequired.length) {
+      throw new Error(`Tài khoản chưa cấp đủ quyền nền tảng bắt buộc: ${missingRequired.join(', ')}.`);
     }
+    const missingActionScopes = META_OAUTH_ACTION_SCOPES.filter((scope) => !granted.has(scope));
 
     const workspaceOwner = await owner();
     const existing = (await getMetaTokens(workspaceOwner)).find((item) => item.metaUserId === metaUserId);
@@ -112,7 +115,9 @@ export async function GET(req: Request) {
           metaUserId,
           metaUserName,
           lastCheckedAt: now,
-          lastError: undefined,
+          lastError: missingActionScopes.length
+            ? `Thiếu quyền thao tác tùy chọn: ${missingActionScopes.join(', ')}`
+            : undefined,
           lastErrorCode: undefined,
           lastErrorSubcode: undefined,
         }
@@ -127,17 +132,28 @@ export async function GET(req: Request) {
           metaUserId,
           metaUserName,
           lastCheckedAt: now,
+          lastError: missingActionScopes.length
+            ? `Thiếu quyền thao tác tùy chọn: ${missingActionScopes.join(', ')}`
+            : undefined,
         };
 
     await db().batch([
       put(workspaceOwner, 'meta-token', record),
-      audit(workspaceOwner, `${existing ? 'Làm mới' : 'Kết nối'} token qua Facebook OAuth: ${metaUserName}`),
+      audit(
+        workspaceOwner,
+        `${existing ? 'Làm mới' : 'Kết nối'} token qua Facebook OAuth: ${metaUserName}`
+          + (missingActionScopes.length ? ` · thiếu quyền tùy chọn ${missingActionScopes.join(', ')}` : ''),
+      ),
     ]);
+
+    const permissionNote = missingActionScopes.length
+      ? ` Token đã được lưu nhưng một số thao tác sẽ bị giới hạn vì còn thiếu: ${missingActionScopes.join(', ')}.`
+      : ' Token đã có đủ các quyền mà dashboard hiện yêu cầu.';
 
     return redirectHome(
       req,
       'success',
-      `Đã kết nối ${metaUserName} và lưu token ${tokenLifetime === 'long-lived' ? 'dài hạn' : 'hiện tại'} vào kho.`,
+      `Đã kết nối ${metaUserName} và lưu token ${tokenLifetime === 'long-lived' ? 'dài hạn' : 'hiện tại'} vào kho.${permissionNote}`,
     );
   } catch (error) {
     return redirectHome(req, 'error', (error as Error).message);
