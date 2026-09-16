@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { BadgeCheck, FileUp, KeyRound, LoaderCircle, RefreshCw, ShieldCheck } from 'lucide-react';
 
 type MixedImportItem = {
@@ -206,7 +206,7 @@ export default function MixedCredentialImport() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
-  const [sessionCount, setSessionCount] = useState(0);
+  const [sessionCount, setSessionCount] = useState<number | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const parsed = useMemo(() => parseMixedInput(text), [text]);
   const tokenCount = parsed.filter((item) => item.token).length;
@@ -221,8 +221,6 @@ export default function MixedCredentialImport() {
       setSessionCount(0);
     }
   }
-
-  useEffect(() => { void loadSessions(); }, []);
 
   async function onFile(file: File | null) {
     setFileName(file?.name || '');
@@ -320,7 +318,7 @@ export default function MixedCredentialImport() {
             <h3 style={{ margin: '6px 0 4px', fontSize: 18 }}>Nạp UID + Cookie + Token trong cùng một file</h3>
             <div style={{ fontSize: 12, color: '#687386', lineHeight: 1.6 }}>Nhận JSON, UID|cookie|token, label|UID|cookie|token, cookie riêng hoặc token riêng. Cookie được mã hóa trước khi lưu và chưa được dùng để tự đăng nhập Facebook.</div>
           </div>
-          <button type="button" onClick={() => void loadSessions()} disabled={busy} style={{ border: '1px solid #d8deea', background: '#fff', borderRadius: 9, padding: '8px 11px', display: 'inline-flex', gap: 6, alignItems: 'center', cursor: 'pointer' }}><RefreshCw size={13}/> {sessionCount} session đã lưu</button>
+          <button type="button" onClick={() => void loadSessions()} disabled={busy} style={{ border: '1px solid #d8deea', background: '#fff', borderRadius: 9, padding: '8px 11px', display: 'inline-flex', gap: 6, alignItems: 'center', cursor: 'pointer' }}><RefreshCw size={13}/> {sessionCount === null ? 'Kiểm tra session' : `${sessionCount} session đã lưu`}</button>
         </div>
 
         <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) 260px', gap: 12, marginTop: 12 }}>
@@ -337,7 +335,7 @@ export default function MixedCredentialImport() {
           <span style={{ fontSize: 11, padding: '5px 8px', borderRadius: 999, background: '#eff6ff' }}>Token {tokenCount}</span>
           <span style={{ fontSize: 11, padding: '5px 8px', borderRadius: 999, background: '#fff7ed' }}>Ghép đôi {pairedCount}</span>
           <button type="button" onClick={() => void importAll()} disabled={busy || !parsed.length} style={{ marginLeft: 'auto', border: 0, borderRadius: 9, padding: '9px 13px', background: 'linear-gradient(90deg,#3478f6,#7656d9)', color: '#fff', fontWeight: 800, display: 'inline-flex', gap: 7, alignItems: 'center', cursor: busy ? 'wait' : 'pointer', opacity: busy || !parsed.length ? .55 : 1 }}>
-            {busy ? <LoaderCircle size={14} style={{ animation: 'spin 1s linear infinite' }}/> : <BadgeCheck size={14}/>} {busy ? 'Đang xử lý…' : 'Nạp + Lọc + Check'}
+            {busy ? <LoaderCircle size={14}/> : <BadgeCheck size={14}/>} {busy ? 'Đang xử lý…' : 'Nạp + Lọc + Check'}
           </button>
         </div>
 
