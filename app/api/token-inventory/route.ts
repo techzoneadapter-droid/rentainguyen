@@ -107,8 +107,8 @@ async function scanToken(workspaceOwner: string, record: MetaTokenRecord, token:
     const inspection = await inspectUserToken(token);
     warnings.push(...inspection.warnings);
     const [businesses, adAccounts] = await Promise.all([
-      safeList(token, 'me/businesses', 'id,name,verification_status', warnings),
-      safeList(token, 'me/adaccounts', 'id,name,account_status,disable_reason', warnings),
+      safeList(token, `${inspection.me.id}/businesses`, 'id,name,verification_status', warnings),
+      safeList(token, `${inspection.me.id}/adaccounts`, 'id,name,account_status,disable_reason', warnings),
     ]);
     const pages = inspection.pages;
     const permissions = inspection.permissions.length

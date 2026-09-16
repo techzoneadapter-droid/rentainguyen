@@ -52,10 +52,11 @@ async function findAsset(workspaceOwner: string, id: string) {
   return asset;
 }
 
-async function getPageToken(userToken: string, pageId: string) {
+async function getPageToken(userToken: string, pageId: string, actor?: string) {
   let after = '';
+  const path = actor && /^\d{5,30}$/.test(actor) ? `${actor}/accounts` : 'me/accounts';
   for (let page = 0; page < 10; page += 1) {
-    const response = await graphWithToken(userToken, 'me/accounts', {
+    const response = await graphWithToken(userToken, path, {
       fields: 'id,name,access_token,tasks',
       limit: '100',
       ...(after ? { after } : {}),
@@ -84,14 +85,14 @@ function requiredPayload(payload: Record<string, unknown>, key: string) {
   return value;
 }
 
-async function refreshAsset(workspaceOwner: string, asset: Asset, token: string) {
+async function refreshAsset(workspaceOwner: string, asset: Asset, token: string, actor?: string) {
   const id = metaId(asset);
   const now = new Date().toISOString();
   let details: MetaObject = {};
   if (asset.type === 'BM') details = await graphWithToken(token, id, { fields: 'id,name,verification_status,timezone_id,primary_page,created_time' }) as MetaObject;
   if (asset.type === 'TKQC') details = await graphWithToken(token, `act_${id}`, { fields: 'id,name,account_status,disable_reason,currency,spend_cap,balance,amount_spent,funding_source_details' }) as MetaObject;
   if (asset.type === 'Page') {
-    const pageToken = await getPageToken(token, id);
+    const pageToken = await getPageToken(token, id, actor);
     details = await graphWithToken(pageToken, id, { fields: 'id,name,link,fan_count,followers_count,verification_status,is_published' }) as MetaObject;
   }
   await put(workspaceOwner, 'asset', {
@@ -127,7 +128,7 @@ export async function POST(req: Request) {
     }
 
     if (input.action === 'refresh') {
-      result = await refreshAsset(workspaceOwner, asset, token);
+      result = await refreshAsset(workspaceOwner, asset, token, source.record.metaUserId);
       message = 'Đã check/refresh tài nguyên bằng token nguồn.';
     } else if (asset.type === 'TKQC' && input.action === 'rename_ad_account') {
       const name = requiredPayload(payload, 'name');
@@ -148,12 +149,12 @@ export async function POST(req: Request) {
     } else if (asset.type === 'Page' && input.action === 'publish_state') {
       const state = requiredPayload(payload, 'state');
       if (!['true', 'false'].includes(state)) throw new Error('state phải là true hoặc false.');
-      const pageToken = await getPageToken(token, id);
+      const pageToken = await getPageToken(token, id, source.record.metaUserId);
       result = await graphPostWithToken(pageToken, id, { is_published: state }) as MetaObject;
       await put(workspaceOwner, 'asset', { ...asset, checked: new Date().toISOString(), status: state === 'true' ? 'Truy cập được' : 'Đã hủy đăng', healthNote: state === 'true' ? 'Đã bật lại Page.' : 'Đã hủy đăng Page.' }).run();
       message = state === 'true' ? 'Đã gửi yêu cầu kích hoạt lại Page.' : 'Đã gửi yêu cầu hủy đăng Page.';
     } else if (asset.type === 'Page' && input.action === 'update_page_info') {
-      const pageToken = await getPageToken(token, id);
+      const pageToken = await getPageToken(token, id, source.record.metaUserId);
       const params: Record<string, string> = {};
       for (const key of ['about', 'description', 'website', 'phone']) {
         const value = text(payload[key]);

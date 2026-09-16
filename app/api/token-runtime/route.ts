@@ -125,8 +125,8 @@ async function scanToken(workspaceOwner: string, record: MetaTokenRecord, rawTok
     }
 
     const [businesses, directAds] = await Promise.all([
-      safeList(token, 'me/businesses', 'id,name,verification_status', warnings),
-      safeList(token, 'me/adaccounts', 'id,name,account_status,disable_reason', warnings),
+      safeList(token, `${inspection.me.id}/businesses`, 'id,name,verification_status', warnings),
+      safeList(token, `${inspection.me.id}/adaccounts`, 'id,name,account_status,disable_reason', warnings),
     ]);
 
     const pageMap = uniqueIds(inspection.pages as unknown as MetaObject[]);

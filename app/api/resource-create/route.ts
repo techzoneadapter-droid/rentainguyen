@@ -80,8 +80,8 @@ export async function POST(req: Request) {
     }
 
     const [businesses, directAccounts] = await Promise.all([
-      safeList(source.token, 'me/businesses', 'id,name,verification_status,timezone_id,primary_page,created_time', warnings),
-      safeList(source.token, 'me/adaccounts', 'id,name,account_status,spend_cap,currency,disable_reason', warnings),
+      safeList(source.token, `${inspection.me.id}/businesses`, 'id,name,verification_status,timezone_id,primary_page,created_time', warnings),
+      safeList(source.token, `${inspection.me.id}/adaccounts`, 'id,name,account_status,spend_cap,currency,disable_reason', warnings),
     ]);
 
     const metaUserId = inspection.me.id;
