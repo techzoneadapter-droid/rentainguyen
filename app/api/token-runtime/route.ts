@@ -211,7 +211,7 @@ async function scanToken(workspaceOwner: string, record: MetaTokenRecord, rawTok
         metaUserId: inventory.metaUserId || record.metaUserId,
         metaUserName: inventory.metaUserName || record.metaUserName,
         lastCheckedAt: now,
-        lastError: warnings.length ? warnings.slice(0, 3).join(' | ') : undefined,
+        lastError: undefined,
         lastErrorCode: undefined,
         lastErrorSubcode: undefined,
         updated: now,
