@@ -1,5 +1,6 @@
 import { audit, db, owner, put } from '../../../../lib/server';
 import {
+  META_OAUTH_REQUIRED_SCOPES,
   META_OAUTH_SCOPES,
   exchangeForLongLivedMetaToken,
   exchangeMetaOAuthCode,
@@ -7,12 +8,10 @@ import {
 import {
   encryptToken,
   getMetaTokens,
-  graphWithToken,
+  inspectUserToken,
   tokenFingerprint,
   type MetaTokenRecord,
 } from '../../../../lib/meta-tokens';
-
-type MetaObject = Record<string, unknown>;
 
 function cookieValue(req: Request, name: string) {
   const cookie = req.headers.get('cookie') || '';
@@ -36,10 +35,6 @@ function redirectHome(req: Request, kind: 'success' | 'error', message: string) 
       'Cache-Control': 'no-store',
     },
   });
-}
-
-function objectValue(value: unknown): MetaObject {
-  return value && typeof value === 'object' && !Array.isArray(value) ? value as MetaObject : {};
 }
 
 export async function GET(req: Request) {
@@ -71,29 +66,15 @@ export async function GET(req: Request) {
       // A valid short-lived token is still useful; do not fail the OAuth connection only because extension failed.
     }
 
-    const [meBody, permissionsBody] = await Promise.all([
-      graphWithToken(accessToken, 'me', { fields: 'id,name' }),
-      graphWithToken(accessToken, 'me/permissions'),
-    ]);
-
-    const metaUserId = String(meBody.id || '');
-    const metaUserName = String(meBody.name || 'Facebook user');
-    if (!/^\d{5,30}$/.test(metaUserId)) {
-      throw new Error('Meta không trả về User ID hợp lệ sau OAuth.');
+    const inspection = await inspectUserToken(accessToken);
+    const metaUserId = inspection.me.id;
+    const metaUserName = inspection.me.name || 'Facebook user';
+    const granted = new Set(inspection.permissions);
+    const missingRequired = META_OAUTH_REQUIRED_SCOPES.filter((scope) => !granted.has(scope));
+    if (missingRequired.length) {
+      throw new Error(`Tài khoản chưa cấp quyền bắt buộc: ${missingRequired.join(', ')}.`);
     }
-
-    const permissions = Array.isArray(permissionsBody.data)
-      ? permissionsBody.data.map(objectValue)
-      : [];
-    const granted = new Set(
-      permissions
-        .filter((item) => String(item.status || '') === 'granted')
-        .map((item) => String(item.permission || '')),
-    );
-    const missing = META_OAUTH_SCOPES.filter((scope) => !granted.has(scope));
-    if (missing.length) {
-      throw new Error(`Tài khoản chưa cấp đủ quyền cần thiết: ${missing.join(', ')}.`);
-    }
+    const missingOptional = META_OAUTH_SCOPES.filter((scope) => !granted.has(scope));
 
     const workspaceOwner = await owner();
     const existing = (await getMetaTokens(workspaceOwner)).find((item) => item.metaUserId === metaUserId);
@@ -134,10 +115,15 @@ export async function GET(req: Request) {
       audit(workspaceOwner, `${existing ? 'Làm mới' : 'Kết nối'} token qua Facebook OAuth: ${metaUserName}`),
     ]);
 
+    const grantedList = Array.from(granted).sort().join(', ');
+    const extraNote = missingOptional.length
+      ? ` Đã lưu ${granted.size} quyền. Chưa cấp: ${missingOptional.join(', ')}.`
+      : ` Đã lưu đủ ${granted.size} quyền Graph.`;
+
     return redirectHome(
       req,
       'success',
-      `Đã kết nối ${metaUserName} và lưu token ${tokenLifetime === 'long-lived' ? 'dài hạn' : 'hiện tại'} vào kho.`,
+      `Đã kết nối ${metaUserName} và lưu token ${tokenLifetime === 'long-lived' ? 'dài hạn' : 'hiện tại'} vào kho.${extraNote} (${grantedList})`,
     );
   } catch (error) {
     return redirectHome(req, 'error', (error as Error).message);
