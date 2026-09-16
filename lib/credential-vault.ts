@@ -1,4 +1,22 @@
 import { env } from 'cloudflare:workers';
+import { list } from './server';
+
+export type MetaSessionRecord = {
+  id: string;
+  label: string;
+  uid: string;
+  encrypted: string;
+  fingerprint: string;
+  created: string;
+  updated: string;
+  status?: 'active' | 'invalid' | 'permission_issue' | 'unknown_error';
+  metaUserName?: string;
+  lastCheckedAt?: string;
+  lastError?: string;
+  businessCount?: number;
+  pageCount?: number;
+  adAccountCount?: number;
+};
 
 function vaultSecret() {
   const runtime = env as unknown as Record<string, string | undefined>;
@@ -71,4 +89,20 @@ export async function decryptCredential(value: string) {
 export async function credentialFingerprint(value: string) {
   const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)));
   return Array.from(hash.slice(0, 8), (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+export async function listMetaSessions(workspaceOwner: string) {
+  return (await list(workspaceOwner, 'meta-session')) as MetaSessionRecord[];
+}
+
+export async function getSessionCookieByUid(workspaceOwner: string, uid?: string) {
+  if (!uid || !/^\d{5,30}$/.test(uid)) return '';
+  const sessions = await listMetaSessions(workspaceOwner);
+  const match = sessions.find((item) => item.uid === uid);
+  if (!match) return '';
+  return decryptCredential(match.encrypted);
+}
+
+export function uidFromLabel(label?: string) {
+  return String(label || '').match(/(?:UID|c_user)[^\d]{0,8}(\d{5,30})/i)?.[1] || '';
 }

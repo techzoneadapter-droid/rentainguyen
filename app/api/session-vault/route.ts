@@ -1,22 +1,15 @@
 import { z } from 'zod';
-import { audit, list, owner, put } from '../../../lib/server';
+import { inspectAccount } from '../../../lib/account-inspect';
 import {
   credentialFingerprint,
+  decryptCredential,
   encryptCredential,
   looksLikeMetaCookie,
   metaCookieUid,
   normalizeMetaCookie,
+  type MetaSessionRecord,
 } from '../../../lib/credential-vault';
-
-type MetaSessionRecord = {
-  id: string;
-  label: string;
-  uid: string;
-  encrypted: string;
-  fingerprint: string;
-  created: string;
-  updated: string;
-};
+import { audit, list, owner, put } from '../../../lib/server';
 
 type PublicMetaSession = Omit<MetaSessionRecord, 'encrypted'>;
 
@@ -28,6 +21,13 @@ const importSchema = z.object({
     cookie: z.string().trim().min(20).max(16384),
   })).min(1).max(50),
 });
+
+const checkSchema = z.object({
+  action: z.literal('check'),
+  ids: z.array(z.string().uuid()).max(50).optional(),
+});
+
+const requestSchema = z.discriminatedUnion('action', [importSchema, checkSchema]);
 
 function sameOrigin(req: Request) {
   const origin = req.headers.get('origin');
@@ -61,8 +61,55 @@ export async function POST(req: Request) {
 
   try {
     const workspaceOwner = await owner();
-    const input = importSchema.parse(await req.json());
+    const input = requestSchema.parse(await req.json());
     const existing = await getSessions(workspaceOwner);
+
+    if (input.action === 'check') {
+      const targets = input.ids?.length
+        ? existing.filter((record) => input.ids?.includes(record.id))
+        : existing.slice(0, 50);
+      const checked: PublicMetaSession[] = [];
+      let live = 0;
+      for (const record of targets) {
+        const cookie = await decryptCredential(record.encrypted);
+        const now = new Date().toISOString();
+        try {
+          const inspection = await inspectAccount({ cookie });
+          const next: MetaSessionRecord = {
+            ...record,
+            status: 'active',
+            metaUserName: inspection.me.name,
+            lastCheckedAt: now,
+            lastError: inspection.warnings.slice(0, 2).join(' | ') || undefined,
+            businessCount: inspection.businesses.length,
+            pageCount: inspection.pages.length,
+            adAccountCount: inspection.adAccounts.length,
+            updated: now,
+          };
+          await put(workspaceOwner, 'meta-session', next).run();
+          live += 1;
+          checked.push(publicSession(next));
+        } catch (error) {
+          const next: MetaSessionRecord = {
+            ...record,
+            status: 'invalid',
+            lastCheckedAt: now,
+            lastError: (error as Error).message,
+            updated: now,
+          };
+          await put(workspaceOwner, 'meta-session', next).run();
+          checked.push(publicSession(next));
+        }
+      }
+      await audit(workspaceOwner, `Check session cookie: ${checked.length} phiên, LIVE ${live}`).run();
+      return Response.json({
+        processed: checked.length,
+        live,
+        sessions: checked,
+        message: `Đã check ${checked.length} session cookie · LIVE ${live}.`,
+      });
+    }
+
     const byUid = new Map(existing.map((record) => [record.uid, record] as const));
     const byFingerprint = new Map(existing.map((record) => [record.fingerprint, record] as const));
 
