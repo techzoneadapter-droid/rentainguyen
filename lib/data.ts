@@ -22,6 +22,9 @@ export type Asset = {
  createdById?:string;
  createdByName?:string;
  sourceTokenId?:string;
+ adAccountCount?:number;
+ pageCount?:number;
+ userCount?:number;
  adminEmail?:string;
  adminInviteStatus?:string;
  adminInviteError?:string;

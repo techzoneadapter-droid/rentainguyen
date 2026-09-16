@@ -1,11 +1,12 @@
 import { z } from 'zod';
+import { inspectAccount } from '../../../lib/account-inspect';
+import { createBusinessAccount } from '../../../lib/bm-profile';
+import { getSessionCookieByUid, uidFromLabel } from '../../../lib/credential-vault';
 import { audit, config, db, owner, put } from '../../../lib/server';
 import {
   classifyMetaTokenError,
-  createBusinessFromToken,
   getMetaTokenSecret,
   graphPostWithToken,
-  inspectUserToken,
   publicToken,
   updateMetaToken,
 } from '../../../lib/meta-tokens';
@@ -20,7 +21,7 @@ const verticals = [
 const createSchema = z.object({
   tokenId: z.string().uuid(),
   name: z.string().trim().min(2).max(100),
-  primaryPage: z.string().regex(/^\d{5,30}$/),
+  primaryPage: z.union([z.string().regex(/^\d{5,30}$/), z.literal('')]).optional(),
   timezone: z.coerce.number().int().min(1).max(1000).default(1),
   vertical: z.enum(verticals).default('ADVERTISING'),
   adminEmail: z.string().trim().email().max(254).optional().or(z.literal('')),
@@ -51,43 +52,27 @@ export async function GET(req: Request) {
     }
 
     const source = await getMetaTokenSecret(workspaceOwner, tokenId);
-    try {
-      const inspection = await inspectUserToken(source.token);
-      const updated = await updateMetaToken(workspaceOwner, source.record, {
-        status: 'active',
-        metaUserId: inspection.me.id,
-        metaUserName: inspection.me.name,
-        lastCheckedAt: new Date().toISOString(),
-        lastError: undefined,
-        lastErrorCode: undefined,
-        lastErrorSubcode: undefined,
-      });
-      return Response.json({
-        pages: inspection.pages,
-        user: inspection.me,
-        debug: inspection.debug,
-        warnings: inspection.warnings,
-        token: publicToken(updated),
-      });
-    } catch (error) {
-      const classified = classifyMetaTokenError(error);
-      const updated = await updateMetaToken(workspaceOwner, source.record, {
-        status: classified.status,
-        lastCheckedAt: new Date().toISOString(),
-        lastError: classified.reason,
-        lastErrorCode: classified.code,
-        lastErrorSubcode: classified.subcode,
-      });
-      return Response.json(
-        {
-          error: classified.reason,
-          tokenStatus: classified.status,
-          token: publicToken(updated),
-          hint: 'Preflight token-only: debug_token → GET /me → GET /me/accounts. Page phải nằm trong /me/accounts.',
-        },
-        { status: 400 },
-      );
-    }
+    const uidHint = source.record.metaUserId || uidFromLabel(source.record.label);
+    let cookie = '';
+    try { cookie = await getSessionCookieByUid(workspaceOwner, uidHint); } catch { cookie = ''; }
+    const inspection = await inspectAccount({ token: source.token, cookie: cookie || undefined });
+    const updated = await updateMetaToken(workspaceOwner, source.record, {
+      status: 'active',
+      metaUserId: inspection.me.id,
+      metaUserName: inspection.me.name,
+      lastCheckedAt: new Date().toISOString(),
+      lastError: undefined,
+      lastErrorCode: undefined,
+      lastErrorSubcode: undefined,
+    });
+    return Response.json({
+      pages: inspection.pages,
+      user: inspection.me,
+      debug: inspection.debug,
+      warnings: inspection.warnings,
+      allowBlank: true,
+      token: publicToken(updated),
+    });
   } catch (error) {
     return Response.json({ error: (error as Error).message }, { status: 400 });
   }
@@ -106,18 +91,24 @@ export async function POST(req: Request) {
     let currentRecord = source.record;
     const now = new Date().toISOString();
 
+    const uidHint = source.record.metaUserId || uidFromLabel(source.record.label);
+    let cookie = '';
+    try { cookie = await getSessionCookieByUid(workspaceOwner, uidHint); } catch { cookie = ''; }
+
     let created;
     try {
-      created = await createBusinessFromToken(source.token, {
+      created = await createBusinessAccount({
+        token: source.token,
+        cookie: cookie || undefined,
         name: input.name,
         vertical: input.vertical,
-        primaryPage: input.primaryPage,
         timezoneId: input.timezone,
+        primaryPage: input.primaryPage || undefined,
       });
     } catch (error) {
       const classified = classifyMetaTokenError(error);
       const updated = await updateMetaToken(workspaceOwner, currentRecord, {
-        status: classified.status === 'unknown_error' ? currentRecord.status : classified.status,
+        status: classified.status === 'create_restricted' ? 'create_restricted' : currentRecord.status,
         lastUsedAt: now,
         lastCreateAt: now,
         lastCreateResult: classified.status === 'permission_issue' ? 'failed_preflight' : 'failed',
@@ -195,25 +186,28 @@ export async function POST(req: Request) {
           name: created.name,
           type: 'BM',
           status: 'Truy cập được',
-          verified: created.verified,
-          verificationStatus: created.verificationStatus,
+          verified: false,
+          verificationStatus: 'unknown',
           country: 'Chưa rõ',
-          tier: 'Chưa rõ',
+          tier: 'BM trắng',
           limit: 'Chưa rõ',
           parent: '',
           source: 'meta',
           checked: now,
-          creationTime: created.createdTime,
-          timezoneId: created.timezoneId,
-          primaryPageId: created.primaryPage.id,
-          primaryPageName: created.primaryPage.name,
-          createdById: created.createdBy.id,
-          createdByName: created.createdBy.name,
+          creationTime: now,
+          timezoneId: String(input.timezone),
+          primaryPageId: input.primaryPage || '',
+          primaryPageName: '',
+          createdById: created.inspection.me.id,
+          createdByName: created.inspection.me.name,
           adminEmail: adminEmail || '',
           adminInviteStatus: invite.status,
           adminInviteError: invite.error || '',
           sourceTokenId: currentRecord.id,
-          healthNote,
+          adAccountCount: 0,
+          pageCount: input.primaryPage ? 1 : 0,
+          userCount: 1,
+          healthNote: `Tạo BM ${created.source === 'cookie' ? 'bằng cookie session' : 'bằng Graph'} — ${input.primaryPage ? 'có Page' : 'BM trắng không Page'}.`,
         }),
         audit(
           workspaceOwner,
@@ -233,22 +227,22 @@ export async function POST(req: Request) {
         id: created.id,
         name: created.name,
         status: 'Truy cập được',
-        verificationStatus: created.verificationStatus,
-        verified: created.verified,
-        creationTime: created.createdTime,
-        timezoneId: created.timezoneId,
-        primaryPage: created.primaryPage,
-        createdBy: created.createdBy,
+        verificationStatus: 'unknown',
+        verified: false,
+        creationTime: now,
+        timezoneId: String(input.timezone),
+        primaryPage: { id: input.primaryPage || '', name: '' },
+        createdBy: created.inspection.me,
       },
       invite,
       message: saved
-        ? `Đã tạo Business Manager ${created.name} trên Meta bằng token ${currentRecord.label}.`
+        ? `Đã tạo Business Manager ${created.name} (${created.source === 'cookie' ? 'cookie session' : 'Graph'}${input.primaryPage ? '' : ', BM trắng không Page'}).`
         : `Business Manager đã được tạo trên Meta (ID ${created.id}) nhưng chưa lưu được vào workspace. Bấm Đồng bộ Meta để nạp lại.`,
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
       return Response.json(
-        { error: 'Token nguồn, tên BM, Page đại diện, email admin, timezone hoặc xác nhận mục đích không hợp lệ.' },
+        { error: 'Token nguồn, tên BM, timezone hoặc xác nhận mục đích không hợp lệ.' },
         { status: 400 },
       );
     }

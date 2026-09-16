@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { Asset } from '../../../lib/data';
 import { audit, db, list, owner, put } from '../../../lib/server';
+import { applyBmProfile, readBmProfile } from '../../../lib/bm-profile';
 import { inspectAccount } from '../../../lib/account-inspect';
 import { getSessionCookieByUid, uidFromLabel } from '../../../lib/credential-vault';
 import {
@@ -162,12 +163,43 @@ export async function POST(req: Request) {
       const businessRecordId = assetId(workspaceOwner, businessId);
       const currentBusiness = existingById.get(businessRecordId);
       const verificationStatus = text(business.verification_status) || 'unknown';
+      const nested = graphOk
+        ? await Promise.all([
+          safeList(source.token, `${businessId}/owned_ad_accounts`, 'id,name,account_status,spend_cap,currency,disable_reason', warnings),
+          safeList(source.token, `${businessId}/client_ad_accounts`, 'id,name,account_status,spend_cap,currency,disable_reason', warnings),
+          safeList(source.token, `${businessId}/owned_pages`, 'id,name', warnings),
+          safeList(source.token, `${businessId}/client_pages`, 'id,name', warnings),
+          safeList(source.token, `${businessId}/adspixels`, 'id,name', warnings),
+        ])
+        : [[], [], [], [], []] as const;
+      const [ownedAccounts, clientAccounts, ownedPages, clientPages, pixels] = nested;
+      [...ownedAccounts, ...clientAccounts].forEach((account) => addAccount(account, businessRecordId));
+      [...ownedPages, ...clientPages].forEach((page) => addSimple(page, 'Page', businessRecordId));
+      pixels.forEach((pixel) => addSimple(pixel, 'Dataset/Pixel', businessRecordId));
 
-      saveAsset({
+      let profile = {
+        name: text(business.name) || currentBusiness?.name || `Business ${businessId}`,
+        verificationStatus,
+        timezoneId: text(business.timezone_id) || currentBusiness?.timezoneId,
+        primaryPageId: text(primaryPage.id) || currentBusiness?.primaryPageId,
+        primaryPageName: text(primaryPage.name) || currentBusiness?.primaryPageName,
+        createdTime: text(business.created_time) || currentBusiness?.creationTime,
+        adAccountCount: ownedAccounts.length + clientAccounts.length,
+        pageCount: ownedPages.length + clientPages.length,
+        userCount: currentBusiness?.userCount,
+        country: currentBusiness?.country,
+        shareLimit: currentBusiness?.limit,
+        kind: '',
+      };
+      if (graphOk) {
+        try { profile = { ...profile, ...(await readBmProfile(source.token, businessId)) }; } catch { /* cookie/session token may block Graph BM fields */ }
+      }
+
+      saveAsset(applyBmProfile({
         ...currentBusiness,
         id: businessRecordId,
         metaId: businessId,
-        name: text(business.name) || currentBusiness?.name || `Business ${businessId}`,
+        name: profile.name,
         type: 'BM',
         status: 'Truy cập được',
         verified: verificationStatus.toLowerCase() === 'verified',
@@ -181,22 +213,7 @@ export async function POST(req: Request) {
         primaryPageId: text(primaryPage.id) || currentBusiness?.primaryPageId,
         primaryPageName: text(primaryPage.name) || currentBusiness?.primaryPageName,
         ...common(currentBusiness),
-      });
-
-      const nested = graphOk
-        ? await Promise.all([
-          safeList(source.token, `${businessId}/owned_ad_accounts`, 'id,name,account_status,spend_cap,currency,disable_reason', warnings),
-          safeList(source.token, `${businessId}/client_ad_accounts`, 'id,name,account_status,spend_cap,currency,disable_reason', warnings),
-          safeList(source.token, `${businessId}/owned_pages`, 'id,name', warnings),
-          safeList(source.token, `${businessId}/client_pages`, 'id,name', warnings),
-          safeList(source.token, `${businessId}/adspixels`, 'id,name', warnings),
-        ])
-        : [[], [], [], [], []] as const;
-      const [ownedAccounts, clientAccounts, ownedPages, clientPages, pixels] = nested;
-
-      [...ownedAccounts, ...clientAccounts].forEach((account) => addAccount(account, businessRecordId));
-      [...ownedPages, ...clientPages].forEach((page) => addSimple(page, 'Page', businessRecordId));
-      pixels.forEach((pixel) => addSimple(pixel, 'Dataset/Pixel', businessRecordId));
+      }, profile));
     }
 
     const unique = Array.from(importedById.values());
