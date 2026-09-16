@@ -358,7 +358,7 @@ export default function MixedCredentialImport() {
       setFileName('');
       if (inputRef.current) inputRef.current.value = '';
       await loadSessions();
-      window.setTimeout(() => window.location.reload(), 900);
+      window.dispatchEvent(new CustomEvent('meta-credentials-imported'));
     } catch (err) {
       setError((err as Error).message);
     } finally {
