@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { applyBmProfile, readBmProfile } from '../../../lib/bm-profile';
 import type { Asset } from '../../../lib/data';
 import { audit, db, list, owner, put } from '../../../lib/server';
 import {
@@ -174,21 +175,21 @@ export async function POST(req: Request) {
             healthNote: message,
           };
         } else if (asset.type === 'BM') {
-          const verificationStatus = text(meta.verification_status) || asset.verificationStatus || 'unknown';
-          const primaryPage = objectValue(meta.primary_page);
-          next = {
+          next = applyBmProfile({
             ...asset,
             name: text(meta.name) || asset.name,
             status: 'Truy cập được',
-            verified: verificationStatus.toLowerCase() === 'verified',
-            verificationStatus,
-            creationTime: text(meta.creation_time) || asset.creationTime,
+            verificationStatus: text(meta.verification_status) || asset.verificationStatus || 'unknown',
+            verified: text(meta.verification_status).toLowerCase() === 'verified',
+            creationTime: text(meta.creation_time) || text(meta.created_time) || asset.creationTime,
             timezoneId: text(meta.timezone_id) || asset.timezoneId,
-            primaryPageId: text(primaryPage.id) || asset.primaryPageId,
-            primaryPageName: text(primaryPage.name) || asset.primaryPageName,
+            primaryPageId: text(objectValue(meta.primary_page).id) || asset.primaryPageId,
+            primaryPageName: text(objectValue(meta.primary_page).name) || asset.primaryPageName,
             checked: now,
             healthNote: message,
-          };
+          }, {});
+          try { next = applyBmProfile(next, await readBmProfile(resolved.token, metaId)); } catch { /* keep counts already stored */ }
+          next = { ...next, checked: now, healthNote: message, status: 'Truy cập được' };
         } else {
           next = {
             ...asset,

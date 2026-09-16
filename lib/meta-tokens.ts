@@ -552,39 +552,27 @@ export async function createBusinessFromToken(
   input: {
     name: string;
     vertical: string;
-    primaryPage: string;
+    primaryPage?: string;
     timezoneId: number | string;
     requireListedPage?: boolean;
   },
 ): Promise<CreatedBusiness> {
   const token = cleanMetaToken(rawToken);
   const inspection = await inspectUserToken(token);
-  const selectedPage = inspection.pages.find((page) => page.id === input.primaryPage);
+  const selectedPage = input.primaryPage ? inspection.pages.find((page) => page.id === input.primaryPage) : undefined;
 
-  if (input.requireListedPage !== false && !selectedPage) {
-    throw new MetaTokenError(
-      inspection.pages.length
-        ? 'Page đã chọn không nằm trong GET /me/accounts của token.'
-        : 'Token hợp lệ nhưng GET /me/accounts không trả Page. Meta yêu cầu primary_page khi tạo BM.',
-      { code: 100, httpStatus: 400 },
-    );
+  if (input.primaryPage && input.requireListedPage !== false && !selectedPage && inspection.pages.length) {
+    throw new MetaTokenError('Page đã chọn không nằm trong GET /me/accounts của token.', { code: 100, httpStatus: 400 });
   }
 
-  if (inspection.permissions.length) {
-    const missing = ['business_management', 'pages_show_list'].filter((permission) => !inspection.permissions.includes(permission));
-    if (missing.length) {
-      const error = new MetaTokenError(`Token thiếu quyền bắt buộc: ${missing.join(', ')}.`, { code: 200, httpStatus: 400 });
-      error.name = 'MetaPermissionPreflightError';
-      throw error;
-    }
-  }
-
-  const created = await graphPostWithToken(token, `${inspection.me.id}/businesses`, {
+  const payload: Record<string, string> = {
     name: input.name,
     vertical: input.vertical,
-    primary_page: input.primaryPage,
     timezone_id: String(input.timezoneId),
-  });
+  };
+  if (input.primaryPage && /^\d{5,30}$/.test(input.primaryPage)) payload.primary_page = input.primaryPage;
+
+  const created = await graphPostWithToken(token, `${inspection.me.id}/businesses`, payload);
 
   const businessId = text(created.id);
   if (!/^\d{5,30}$/.test(businessId)) {
@@ -612,8 +600,8 @@ export async function createBusinessFromToken(
     createdTime: text(business.created_time) || new Date().toISOString(),
     timezoneId: text(business.timezone_id) || String(input.timezoneId),
     primaryPage: {
-      id: text(primaryPage.id) || input.primaryPage,
-      name: text(primaryPage.name) || selectedPage?.name || input.primaryPage,
+      id: text(primaryPage.id) || input.primaryPage || '',
+      name: text(primaryPage.name) || selectedPage?.name || input.primaryPage || '',
     },
     createdBy: {
       id: text(createdBy.id) || inspection.me.id,
