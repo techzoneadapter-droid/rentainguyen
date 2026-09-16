@@ -1,4 +1,5 @@
 import { env } from 'cloudflare:workers';
+import { uniqueScopes } from './meta-scopes';
 import { config, list, put } from './server';
 
 export type MetaTokenStatus =
@@ -320,15 +321,15 @@ export async function inspectUserToken(rawToken: string): Promise<TokenInspectio
 
   let permissions: string[] = [];
   try {
-    const rows = await graphListWithToken(token, 'me/permissions', 'permission,status');
+    const rows = await graphListWithToken(token, 'me/permissions', 'permission,status', 5);
     permissions = rows
       .filter((row) => text(row.status).toLowerCase() === 'granted')
       .map((row) => text(row.permission))
-      .filter(Boolean)
-      .sort();
+      .filter(Boolean);
   } catch (error) {
     warnings.push(`me/permissions: ${classifyMetaTokenError(error).reason}`);
   }
+  permissions = uniqueScopes(permissions, debug?.scopes);
 
   let pages: ManagedPage[] = [];
   try {

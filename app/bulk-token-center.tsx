@@ -14,6 +14,7 @@ import {
   Upload,
   UserPlus,
 } from 'lucide-react';
+import { TOKEN_FULL_SCOPE_LABELS } from '../lib/meta-scopes';
 import styles from './bulk-token-center.module.css';
 
 type TokenStatus = 'active' | 'invalid' | 'permission_issue' | 'rate_limited' | 'create_restricted' | 'unknown_error';
@@ -73,17 +74,6 @@ const statusLabel: Record<TokenStatus, string> = {
   create_restricted: 'Giới hạn tạo BM',
   unknown_error: 'Chưa rõ',
 };
-
-const capabilityScopes = [
-  ['business_management', 'BM: đọc/tạo/mời người'],
-  ['ads_management', 'Ads: quản lý chiến dịch'],
-  ['ads_read', 'Ads: đọc trạng thái'],
-  ['read_insights', 'Ads/Page: đọc Insights'],
-  ['pages_show_list', 'Page: liệt kê Page'],
-  ['pages_manage_posts', 'Page: đăng/quản lý bài'],
-  ['pages_manage_engagement', 'Page: quản lý tương tác'],
-  ['pages_messaging', 'Page: nhắn tin'],
-] as const;
 
 function tone(status: TokenStatus) {
   if (status === 'active') return styles.good;
@@ -474,7 +464,7 @@ export default function BulkTokenCenter() {
             <strong>Quyền token được dùng thế nào</strong>
             <p className={styles.hint}>App đọc permission thực tế của từng token rồi chỉ bật luồng tương ứng. Scope có tên trong token không tự động vượt role của user/BM/Page.</p>
             <div className={styles.capGrid}>
-              {capabilityScopes.map(([scope, label]) => <div className={styles.cap} key={scope}><strong>{scope}</strong><span>{label}</span></div>)}
+              {TOKEN_FULL_SCOPE_LABELS.map(([scope, label]) => <div className={styles.cap} key={scope}><strong>{scope}</strong><span>{label}</span></div>)}
               <div className={styles.cap}><strong>publish_actions</strong><span>Legacy: không dùng để đăng profile</span></div>
             </div>
           </div>
@@ -492,7 +482,7 @@ export default function BulkTokenCenter() {
         </div>
         <div className={styles.summary}>
           <span><Filter size={12} /> Hiển thị {filtered.length}/{tokens.length}</span>
-          <select value={permissionFilter} onChange={(event) => setPermissionFilter(event.target.value)}><option value="ALL">Tất cả quyền</option>{capabilityScopes.map(([scope]) => <option key={scope} value={scope}>{scope}</option>)}</select>
+          <select value={permissionFilter} onChange={(event) => setPermissionFilter(event.target.value)}><option value="ALL">Tất cả quyền</option>{TOKEN_FULL_SCOPE_LABELS.map(([scope]) => <option key={scope} value={scope}>{scope}</option>)}</select>
           <button className={styles.miniButton} type="button" disabled={!selected.length || busy} onClick={() => void rescan(selected)}>Quét lại {selected.length || ''}</button>
         </div>
       </section>
@@ -514,7 +504,7 @@ export default function BulkTokenCenter() {
                   <td className={styles.count}>{inv?.liveAdCount ?? '—'}</td>
                   <td className={styles.count}>{inv?.dieAdCount ?? '—'}</td>
                   <td className={styles.count}>{inv?.totalResources ?? '—'}</td>
-                  <td className={styles.scopeCell}>{(inv?.permissions || []).filter((permission) => capabilityScopes.some(([scope]) => scope === permission)).slice(0, 6).map((permission) => <span className={styles.scope} key={permission}>{permission}</span>)}{inv && !inv.permissions.length && <span className={styles.muted}>Không đọc được scope</span>}</td>
+                  <td className={styles.scopeCell}>{(inv?.permissions || []).map((permission) => <span className={styles.scope} key={permission}>{permission}</span>)}{inv && !inv.permissions.length && <span className={styles.muted}>Không đọc được scope</span>}</td>
                   <td>{dateText(inv?.scannedAt)}</td>
                   <td><div className={styles.inlineButtons}><button className={styles.miniButton} type="button" onClick={() => void rescan([token.id])}>Check</button><button className={styles.miniButton} type="button" onClick={() => void loadOps(token.id)}>Tác vụ</button></div></td>
                 </tr>;
@@ -530,7 +520,7 @@ export default function BulkTokenCenter() {
             <h3><KeyRound size={16} /> Tác vụ theo token</h3>
             <label>Token<select value={opsTokenId} onChange={(event) => void loadOps(event.target.value)}><option value="">Chọn token</option>{tokens.map((token) => <option key={token.id} value={token.id}>{token.label} · {statusLabel[token.status]}</option>)}</select></label>
             {opsLoading && <div className={styles.hint}>Đang đọc BM/TKQC của token…</div>}
-            {opsTokenId && <div className={styles.capGrid}>{capabilityScopes.map(([scope, label]) => <div className={styles.cap} key={scope}><strong>{currentPermissions.includes(scope) ? '✓' : '—'} {scope}</strong><span>{label}</span></div>)}</div>}
+            {opsTokenId && <div className={styles.capGrid}>{TOKEN_FULL_SCOPE_LABELS.map(([scope, label]) => <div className={styles.cap} key={scope}><strong>{currentPermissions.includes(scope) ? '✓' : '—'} {scope}</strong><span>{label}</span></div>)}</div>}
             <button className={`${styles.miniButton} ${styles.primary}`} type="button" disabled={!opsTokenId || !currentPermissions.includes('business_management')} onClick={openCreateBm}><Building2 size={15} /> Mở luồng Tạo BM</button>
             <div className={styles.note}>“Không có BM” trong bộ lọc nghĩa là API không trả về BM nào token đang được phép truy cập; app không khẳng định tài khoản đó chưa từng tạo BM trong quá khứ.</div>
           </div>

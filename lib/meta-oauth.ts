@@ -1,5 +1,8 @@
 import { env } from 'cloudflare:workers';
 import { config } from './server';
+import { META_OAUTH_SCOPES } from './meta-scopes';
+
+export { META_OAUTH_REQUIRED_SCOPES, META_OAUTH_SCOPES, TOKEN_FULL_SCOPES } from './meta-scopes';
 
 type OAuthTokenBody = {
   access_token?: string;
@@ -7,12 +10,6 @@ type OAuthTokenBody = {
   expires_in?: number;
   error?: { message?: string; code?: number; error_subcode?: number };
 };
-
-export const META_OAUTH_SCOPES = [
-  'business_management',
-  'pages_show_list',
-  'pages_read_engagement',
-] as const;
 
 function workerEnv() {
   return env as unknown as Record<string, string | undefined>;
@@ -44,6 +41,7 @@ export function metaOAuthDialogUrl(req: Request, state: string) {
   url.searchParams.set('redirect_uri', oauth.redirectUri);
   url.searchParams.set('state', state);
   url.searchParams.set('response_type', 'code');
+  url.searchParams.set('auth_type', 'rerequest');
   url.searchParams.set('scope', META_OAUTH_SCOPES.join(','));
   return url;
 }
