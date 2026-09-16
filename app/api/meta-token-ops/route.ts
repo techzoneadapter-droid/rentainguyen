@@ -44,6 +44,11 @@ function objectValue(value: unknown): MetaObject {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as MetaObject : {};
 }
 
+function actorEdge(record: { metaUserId?: string }, edge: string) {
+  const id = text(record.metaUserId);
+  return /^\d{5,30}$/.test(id) ? `${id}/${edge}` : `me/${edge}`;
+}
+
 async function graphListWithToken(token: string, path: string, fields: string) {
   const rows: MetaObject[] = [];
   let after = '';
@@ -62,15 +67,15 @@ async function graphListWithToken(token: string, path: string, fields: string) {
   return rows;
 }
 
-async function assertBusinessAccess(token: string, businessId: string) {
-  const businesses = await graphListWithToken(token, 'me/businesses', 'id,name,verification_status');
+async function assertBusinessAccess(token: string, businessId: string, actor?: string) {
+  const businesses = await graphListWithToken(token, actorEdge({ metaUserId: actor }, 'businesses'), 'id,name,verification_status');
   const business = businesses.find((item) => text(item.id) === businessId);
   if (!business) throw new Error('Token không có Business Manager này trong danh sách được phép truy cập.');
   return business;
 }
 
-async function assertAdAccountAccess(token: string, adAccountId: string) {
-  const accounts = await graphListWithToken(token, 'me/adaccounts', 'id,name,account_status');
+async function assertAdAccountAccess(token: string, adAccountId: string, actor?: string) {
+  const accounts = await graphListWithToken(token, actorEdge({ metaUserId: actor }, 'adaccounts'), 'id,name,account_status');
   const account = accounts.find((item) => text(item.id).replace(/^act_/, '') === adAccountId);
   if (!account) throw new Error('Token không có tài khoản quảng cáo này trong danh sách được phép truy cập.');
   return account;
@@ -85,8 +90,8 @@ export async function GET(req: Request) {
     }
     const source = await getMetaTokenSecret(workspaceOwner, tokenId);
     const [businesses, adAccounts] = await Promise.all([
-      graphListWithToken(source.token, 'me/businesses', 'id,name,verification_status'),
-      graphListWithToken(source.token, 'me/adaccounts', 'id,name,account_status,currency,spend_cap'),
+      graphListWithToken(source.token, actorEdge(source.record, 'businesses'), 'id,name,verification_status'),
+      graphListWithToken(source.token, actorEdge(source.record, 'adaccounts'), 'id,name,account_status,currency,spend_cap'),
     ]);
     return Response.json({
       businesses: businesses.map((item) => ({
@@ -120,7 +125,7 @@ export async function POST(req: Request) {
     const now = new Date().toISOString();
 
     if (input.action === 'invite_business_user') {
-      const business = await assertBusinessAccess(source.token, input.businessId);
+      const business = await assertBusinessAccess(source.token, input.businessId, source.record.metaUserId);
       await graphPostWithToken(source.token, `${input.businessId}/business_users`, {
         email: input.email,
         role: input.role,
@@ -139,7 +144,7 @@ export async function POST(req: Request) {
       });
     }
 
-    await assertAdAccountAccess(source.token, input.adAccountId);
+    await assertAdAccountAccess(source.token, input.adAccountId, source.record.metaUserId);
     const account = await graphWithToken(source.token, `act_${input.adAccountId}`, {
       fields: 'id,name,account_status,disable_reason,currency,balance,amount_spent,spend_cap,funding_source,funding_source_details',
     }) as MetaObject;

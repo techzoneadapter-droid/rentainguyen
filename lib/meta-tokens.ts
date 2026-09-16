@@ -220,9 +220,85 @@ function makeMetaError(response: Response, body: GraphBody) {
 }
 
 /**
- * Graph client token-only: gắn access_token trên query (GET) hoặc form body (POST).
- * Không cookie, không OAuth dialog, không Authorization Bearer.
+ * Graph client token-only. Session/extension token (Power Editor, Ads Manager)
+ * thường fail GET /me với 190 Error loading application. Retry unversioned + user-id.
  */
+function workerEnv() {
+  return env as unknown as Record<string, string | undefined>;
+}
+
+function metaAppAccessToken() {
+  const runtime = workerEnv();
+  const appId = runtime.META_APP_ID || process.env.META_APP_ID || '';
+  const appSecret = runtime.META_APP_SECRET || process.env.META_APP_SECRET || '';
+  if (appId && appSecret) return `${appId}|${appSecret}`;
+  return '';
+}
+
+export function isAppLoadError(error: unknown) {
+  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  const code = error instanceof MetaTokenError ? error.code : undefined;
+  return /error loading application|cannot load application|error validating application|application has been deleted/.test(message)
+    || ((code === 1 || code === 100 || code === 190) && /application/.test(message));
+}
+
+export function graphEdge(userId: string, edge: string) {
+  return `${userId}/${edge.replace(/^\//, '')}`;
+}
+
+const UA_WEB = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+const UA_FB = 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.43 Mobile Safari/537.36 [FBAN/FB4A;FBAV/10.0.0.1.70;]';
+
+type GraphCallStyle = {
+  version: string;
+  mode: 'get-query' | 'post-get' | 'oauth-header' | 'form-post';
+  ua: string;
+};
+
+async function metaRequestOnce(
+  token: string,
+  path: string,
+  method: 'GET' | 'POST',
+  params: Record<string, string>,
+  style: GraphCallStyle,
+) {
+  const cleanPath = path.replace(/^\//, '');
+  const prefix = style.version ? `${style.version}/` : '';
+  const url = new URL(`https://graph.facebook.com/${prefix}${cleanPath}`);
+  const headers: Record<string, string> = { 'User-Agent': style.ua };
+  const options: RequestInit = {
+    method,
+    headers,
+    signal: AbortSignal.timeout(25000),
+  };
+
+  if (style.mode === 'form-post' || (method === 'POST' && style.mode !== 'post-get')) {
+    const body = new URLSearchParams(params);
+    body.set('access_token', token);
+    headers['Content-Type'] = 'application/x-www-form-urlencoded';
+    options.method = 'POST';
+    options.body = body;
+  } else if (style.mode === 'post-get') {
+    const body = new URLSearchParams(params);
+    body.set('access_token', token);
+    body.set('method', 'get');
+    headers['Content-Type'] = 'application/x-www-form-urlencoded';
+    options.method = 'POST';
+    options.body = body;
+  } else {
+    for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
+    url.searchParams.set('access_token', token);
+    url.searchParams.set('format', 'json');
+    if (style.mode === 'oauth-header') headers.Authorization = `OAuth ${token}`;
+    options.method = 'GET';
+  }
+
+  const response = await fetch(url, options);
+  const body = (await response.json().catch(() => ({}))) as GraphBody;
+  if (!response.ok || body.error) throw makeMetaError(response, body);
+  return body;
+}
+
 async function metaRequest(
   rawToken: string,
   path: string,
@@ -235,30 +311,53 @@ async function metaRequest(
   }
 
   const version = config().version;
-  const url = new URL(`https://graph.facebook.com/${version}/${path.replace(/^\//, '')}`);
-  const options: RequestInit = {
-    method,
-    signal: AbortSignal.timeout(25000),
-  };
+  const attempts: GraphCallStyle[] = method === 'GET'
+    ? [
+        { version, mode: 'get-query', ua: UA_WEB },
+        { version: '', mode: 'get-query', ua: UA_FB },
+        { version: 'v18.0', mode: 'get-query', ua: UA_FB },
+        { version, mode: 'post-get', ua: UA_FB },
+        { version, mode: 'oauth-header', ua: UA_FB },
+      ]
+    : [
+        { version, mode: 'form-post', ua: UA_WEB },
+        { version: '', mode: 'form-post', ua: UA_FB },
+        { version: 'v18.0', mode: 'form-post', ua: UA_FB },
+      ];
 
-  if (method === 'GET') {
-    for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
-    url.searchParams.set('access_token', token);
-  } else {
-    const body = new URLSearchParams(params);
-    body.set('access_token', token);
-    options.headers = { 'Content-Type': 'application/x-www-form-urlencoded' };
-    options.body = body;
+  let lastError: unknown;
+  for (let index = 0; index < attempts.length; index += 1) {
+    try {
+      return await metaRequestOnce(token, path, method, params, attempts[index]);
+    } catch (error) {
+      lastError = error;
+      const canRetry = index < attempts.length - 1 && isAppLoadError(error);
+      if (!canRetry) throw error;
+    }
   }
-
-  const response = await fetch(url, options);
-  const body = (await response.json().catch(() => ({}))) as GraphBody;
-  if (!response.ok || body.error) throw makeMetaError(response, body);
-  return body;
+  throw lastError;
 }
 
 export function graphWithToken(token: string, path: string, params: Record<string, string> = {}) {
   return metaRequest(token, path, 'GET', params);
+}
+
+export async function graphListActor(token: string, userId: string | undefined, edge: string, fields: string, maxPages = 12) {
+  const targets = [
+    userId && /^\d{5,30}$/.test(userId) ? graphEdge(userId, edge) : '',
+    `me/${edge.replace(/^\//, '')}`,
+  ].filter(Boolean);
+  let lastError: unknown;
+  for (const path of targets) {
+    try {
+      return await graphListWithToken(token, path, fields, maxPages);
+    } catch (error) {
+      lastError = error;
+      if (!isAppLoadError(error) && targets.indexOf(path) === targets.length - 1) throw error;
+    }
+  }
+  if (lastError) throw lastError;
+  return [];
 }
 
 export function graphPostWithToken(token: string, path: string, params: Record<string, string>) {
@@ -284,8 +383,9 @@ export async function graphListWithToken(token: string, path: string, fields: st
 }
 
 export async function debugUserToken(token: string): Promise<TokenDebugInfo | null> {
-  try {
-    const body = await graphWithToken(token, 'debug_token', { input_token: cleanMetaToken(token) });
+  const cleaned = cleanMetaToken(token);
+
+  function parse(body: GraphBody): TokenDebugInfo {
     const data = objectValue(body.data);
     const scopesRaw = data.scopes;
     const scopes = Array.isArray(scopesRaw)
@@ -299,9 +399,24 @@ export async function debugUserToken(token: string): Promise<TokenDebugInfo | nu
       scopes,
       expiresAt: Number(data.expires_at || 0) || undefined,
     };
-  } catch {
-    return null;
   }
+
+  try {
+    return parse(await graphWithToken(cleaned, 'debug_token', { input_token: cleaned }));
+  } catch {
+    const appToken = metaAppAccessToken();
+    if (!appToken) return null;
+    try {
+      return parse(await graphWithToken(appToken, 'debug_token', { input_token: cleaned }));
+    } catch {
+      return null;
+    }
+  }
+}
+
+async function readActorProfile(token: string, userId: string) {
+  const body = await graphWithToken(token, userId, { fields: 'id,name' });
+  return { id: text(body.id) || userId, name: text(body.name) || `Meta User ${userId}` };
 }
 
 export async function inspectUserToken(rawToken: string): Promise<TokenInspection> {
@@ -309,30 +424,71 @@ export async function inspectUserToken(rawToken: string): Promise<TokenInspectio
   const warnings: string[] = [];
   const debug = await debugUserToken(token);
 
-  const meBody = await graphWithToken(token, 'me', { fields: 'id,name' });
-  const meId = text(meBody.id);
-  const meName = text(meBody.name);
+  let meId = '';
+  let meName = '';
+  let sessionCompat = false;
+
+  if (debug?.isValid && debug.userId && /^\d{5,30}$/.test(debug.userId)) {
+    try {
+      const profile = await readActorProfile(token, debug.userId);
+      meId = profile.id;
+      meName = profile.name;
+    } catch (error) {
+      if (isAppLoadError(error) || (error instanceof MetaTokenError && error.code === 190)) {
+        sessionCompat = true;
+        meId = debug.userId;
+        meName = `Meta User ${debug.userId}`;
+        warnings.push('Session/extension token: Graph từ chối đọc profile (Error loading application). Dùng debug_token.user_id và gọi /{user-id}/… với quyền sẵn có trên token.');
+      } else {
+        throw error;
+      }
+    }
+  }
+
+  if (!meId) {
+    try {
+      const meBody = await graphWithToken(token, 'me', { fields: 'id,name' });
+      meId = text(meBody.id);
+      meName = text(meBody.name);
+    } catch (error) {
+      if (debug?.isValid && debug.userId && /^\d{5,30}$/.test(debug.userId) && isAppLoadError(error)) {
+        sessionCompat = true;
+        meId = debug.userId;
+        meName = `Meta User ${debug.userId}`;
+        warnings.push('GET /me bị Error loading application. Bỏ alias /me, dùng user id từ debug_token.');
+      } else {
+        throw error;
+      }
+    }
+  }
+
   if (!/^\d{5,30}$/.test(meId)) {
-    throw new MetaTokenError('Meta không trả về app-scoped User ID hợp lệ từ /me.', { code: 100, httpStatus: 400 });
+    if (debug && !debug.isValid) {
+      throw new MetaTokenError('Meta debug_token trả về is_valid=false.', { code: 190, httpStatus: 400 });
+    }
+    throw new MetaTokenError('Không lấy được User ID từ debug_token hoặc /me.', { code: 100, httpStatus: 400 });
   }
-  if (debug && !debug.isValid) {
-    warnings.push('debug_token trả về is_valid=false, nhưng GET /me vẫn xác nhận user. Dùng kết quả /me để xác định token LIVE.');
-  }
+
+  const actor = meId;
 
   let permissions: string[] = [];
   try {
     let rows: MetaObject[];
     try {
-      rows = await graphListWithToken(token, 'me/permissions', 'permission,status', 5);
+      rows = await graphListWithToken(token, graphEdge(actor, 'permissions'), 'permission,status', 5);
     } catch {
-      rows = await graphListWithToken(token, 'me/permissions', '', 5);
+      try {
+        rows = await graphListWithToken(token, 'me/permissions', 'permission,status', 5);
+      } catch {
+        rows = await graphListWithToken(token, graphEdge(actor, 'permissions'), '', 5);
+      }
     }
     permissions = rows
       .filter((row) => text(row.status).toLowerCase() === 'granted')
       .map((row) => text(row.permission))
       .filter(Boolean);
   } catch (error) {
-    warnings.push(`me/permissions: ${classifyMetaTokenError(error).reason}`);
+    warnings.push(`permissions: ${classifyMetaTokenError(error).reason}`);
   }
   permissions = uniqueScopes(permissions, debug?.scopes);
 
@@ -340,10 +496,14 @@ export async function inspectUserToken(rawToken: string): Promise<TokenInspectio
   try {
     let rows: MetaObject[];
     try {
-      rows = await graphListWithToken(token, 'me/accounts', 'id,name,tasks');
+      rows = await graphListWithToken(token, graphEdge(actor, 'accounts'), 'id,name,tasks');
     } catch {
-      rows = await graphListWithToken(token, 'me/accounts', 'id,name');
-      warnings.push('me/accounts không trả tasks; vẫn dùng id và name của Page để chọn primary_page.');
+      try {
+        rows = await graphListWithToken(token, graphEdge(actor, 'accounts'), 'id,name');
+        warnings.push('accounts không trả tasks; vẫn dùng id và name của Page.');
+      } catch {
+        rows = await graphListWithToken(token, 'me/accounts', 'id,name');
+      }
     }
     const map = new Map<string, ManagedPage>();
     for (const row of rows) {
@@ -357,11 +517,11 @@ export async function inspectUserToken(rawToken: string): Promise<TokenInspectio
     }
     pages = Array.from(map.values());
   } catch (error) {
-    warnings.push(`me/accounts: ${classifyMetaTokenError(error).reason}`);
+    warnings.push(`accounts: ${classifyMetaTokenError(error).reason}`);
   }
 
-  if (debug?.userId && debug.userId !== meId) {
-    warnings.push(`debug_token.user_id (${debug.userId}) khác /me.id (${meId}). Dùng /me.id cho mọi call tạo tài nguyên.`);
+  if (sessionCompat) {
+    warnings.push('Token đang chạy ở chế độ session/extension: không dùng OAuth dialog, gọi thẳng Graph bằng access_token và user id.');
   }
 
   return {

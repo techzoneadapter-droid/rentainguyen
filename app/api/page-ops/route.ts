@@ -45,10 +45,11 @@ function objectValue(value: unknown): MetaObject {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as MetaObject : {};
 }
 
-async function pageAccessToken(userToken: string, pageId: string) {
+async function pageAccessToken(userToken: string, pageId: string, actor?: string) {
   let after = '';
+  const path = actor && /^\d{5,30}$/.test(actor) ? `${actor}/accounts` : 'me/accounts';
   for (let page = 0; page < 10; page += 1) {
-    const response = await graphWithToken(userToken, 'me/accounts', {
+    const response = await graphWithToken(userToken, path, {
       fields: 'id,name,tasks,access_token',
       limit: '100',
       ...(after ? { after } : {}),
@@ -105,7 +106,7 @@ export async function GET(req: Request) {
       pageId: url.searchParams.get('pageId') || '',
     });
     const source = await getMetaTokenSecret(workspaceOwner, input.tokenId);
-    const page = await pageAccessToken(source.token, input.pageId);
+    const page = await pageAccessToken(source.token, input.pageId, source.record.metaUserId);
     const [details, posts] = await Promise.all([
       graphWithToken(page.token, input.pageId, { fields: 'id,name,link,fan_count,followers_count,verification_status' }) as Promise<MetaObject>,
       listPosts(page.token, input.pageId),
@@ -134,7 +135,7 @@ export async function POST(req: Request) {
     const workspaceOwner = await owner();
     const input = requestSchema.parse(await req.json());
     const source = await getMetaTokenSecret(workspaceOwner, input.tokenId);
-    const page = await pageAccessToken(source.token, input.pageId);
+    const page = await pageAccessToken(source.token, input.pageId, source.record.metaUserId);
     if (input.action === 'publish') {
       const result = await graphPostWithToken(page.token, `${input.pageId}/feed`, { message: input.message });
       await updateMetaToken(workspaceOwner, source.record, { status: 'active', lastUsedAt: new Date().toISOString(), lastError: undefined });
