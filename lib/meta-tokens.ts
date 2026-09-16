@@ -30,7 +30,7 @@ export type MetaTokenRecord = {
 
 export type PublicMetaToken = Omit<MetaTokenRecord, 'encrypted'>;
 
-type GraphBody = {
+export type GraphBody = {
   error?: {
     message?: string;
     code?: number;
@@ -39,7 +39,47 @@ type GraphBody = {
     error_user_msg?: string;
     is_transient?: boolean;
   };
+  data?: unknown;
+  paging?: { cursors?: { after?: string }; next?: string };
   [key: string]: unknown;
+};
+
+export type MetaObject = Record<string, unknown>;
+
+export type TokenDebugInfo = {
+  isValid: boolean;
+  userId: string;
+  appId: string;
+  type: string;
+  scopes: string[];
+  expiresAt?: number;
+};
+
+export type ManagedPage = {
+  id: string;
+  name: string;
+  tasks: string[];
+};
+
+export type TokenInspection = {
+  debug: TokenDebugInfo | null;
+  me: { id: string; name: string };
+  permissions: string[];
+  pages: ManagedPage[];
+  warnings: string[];
+};
+
+export type CreatedBusiness = {
+  id: string;
+  name: string;
+  verificationStatus: string;
+  verified: boolean;
+  createdTime: string;
+  timezoneId: string;
+  primaryPage: { id: string; name: string };
+  createdBy: { id: string; name: string };
+  raw: MetaObject;
+  inspection: TokenInspection;
 };
 
 export class MetaTokenError extends Error {
@@ -81,12 +121,29 @@ function base64ToBytes(value: string) {
   return Uint8Array.from(binary, (char) => char.charCodeAt(0));
 }
 
+export function cleanMetaToken(value: string) {
+  return String(value || '')
+    .replace(/^\s*Bearer\s+/i, '')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .replace(/^['"]|['"]$/g, '')
+    .replace(/\s+/g, '')
+    .trim();
+}
+
+function objectValue(value: unknown): MetaObject {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as MetaObject : {};
+}
+
+function text(value: unknown) {
+  return value === undefined || value === null ? '' : String(value).trim();
+}
+
 export async function encryptToken(token: string) {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const encrypted = await crypto.subtle.encrypt(
     { name: 'AES-GCM', iv },
     await aesKey(),
-    new TextEncoder().encode(token),
+    new TextEncoder().encode(cleanMetaToken(token)),
   );
   return `${bytesToBase64(iv)}.${bytesToBase64(new Uint8Array(encrypted))}`;
 }
@@ -99,11 +156,11 @@ export async function decryptToken(value: string) {
     await aesKey(),
     base64ToBytes(cipherText),
   );
-  return new TextDecoder().decode(plain);
+  return cleanMetaToken(new TextDecoder().decode(plain));
 }
 
 export async function tokenFingerprint(token: string) {
-  const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token)));
+  const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(cleanMetaToken(token))));
   return Array.from(hash.slice(0, 6), (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
@@ -161,32 +218,40 @@ function makeMetaError(response: Response, body: GraphBody) {
   });
 }
 
+/**
+ * Graph client token-only: gắn access_token trên query (GET) hoặc form body (POST).
+ * Không cookie, không OAuth dialog, không Authorization Bearer.
+ */
 async function metaRequest(
-  token: string,
+  rawToken: string,
   path: string,
   method: 'GET' | 'POST',
   params: Record<string, string>,
 ) {
+  const token = cleanMetaToken(rawToken);
+  if (token.length < 20) {
+    throw new MetaTokenError('Token trống hoặc quá ngắn sau khi làm sạch.', { code: 400, httpStatus: 400 });
+  }
+
   const version = config().version;
-  const url = new URL(`https://graph.facebook.com/${version}/${path}`);
+  const url = new URL(`https://graph.facebook.com/${version}/${path.replace(/^\//, '')}`);
   const options: RequestInit = {
     method,
-    headers: { Authorization: `Bearer ${token}` },
     signal: AbortSignal.timeout(25000),
   };
 
   if (method === 'GET') {
     for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
+    url.searchParams.set('access_token', token);
   } else {
-    options.headers = {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/x-www-form-urlencoded',
-    };
-    options.body = new URLSearchParams(params);
+    const body = new URLSearchParams(params);
+    body.set('access_token', token);
+    options.headers = { 'Content-Type': 'application/x-www-form-urlencoded' };
+    options.body = body;
   }
 
   const response = await fetch(url, options);
-  const body = (await response.json()) as GraphBody;
+  const body = (await response.json().catch(() => ({}))) as GraphBody;
   if (!response.ok || body.error) throw makeMetaError(response, body);
   return body;
 }
@@ -197,6 +262,180 @@ export function graphWithToken(token: string, path: string, params: Record<strin
 
 export function graphPostWithToken(token: string, path: string, params: Record<string, string>) {
   return metaRequest(token, path, 'POST', params);
+}
+
+export async function graphListWithToken(token: string, path: string, fields: string, maxPages = 12) {
+  const rows: MetaObject[] = [];
+  let after = '';
+  for (let page = 0; page < maxPages; page += 1) {
+    const response = await graphWithToken(token, path, {
+      fields,
+      limit: '100',
+      ...(after ? { after } : {}),
+    });
+    const pageRows = Array.isArray(response.data) ? response.data.map(objectValue) : [];
+    rows.push(...pageRows);
+    const cursor = text(objectValue(objectValue(response.paging).cursors).after);
+    if (!cursor || pageRows.length === 0) break;
+    after = cursor;
+  }
+  return rows;
+}
+
+export async function debugUserToken(token: string): Promise<TokenDebugInfo | null> {
+  try {
+    const body = await graphWithToken(token, 'debug_token', { input_token: cleanMetaToken(token) });
+    const data = objectValue(body.data);
+    const scopesRaw = data.scopes;
+    const scopes = Array.isArray(scopesRaw)
+      ? scopesRaw.map((item) => text(item)).filter(Boolean)
+      : text(scopesRaw).split(',').map((item) => item.trim()).filter(Boolean);
+    return {
+      isValid: data.is_valid === true,
+      userId: text(data.user_id),
+      appId: text(data.app_id),
+      type: text(data.type) || text(data.token_type),
+      scopes,
+      expiresAt: Number(data.expires_at || 0) || undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function inspectUserToken(rawToken: string): Promise<TokenInspection> {
+  const token = cleanMetaToken(rawToken);
+  const warnings: string[] = [];
+  const debug = await debugUserToken(token);
+  if (debug && !debug.isValid) {
+    throw new MetaTokenError('Meta debug_token trả về is_valid=false.', { code: 190, httpStatus: 400 });
+  }
+
+  const meBody = await graphWithToken(token, 'me', { fields: 'id,name' });
+  const meId = text(meBody.id);
+  const meName = text(meBody.name);
+  if (!/^\d{5,30}$/.test(meId)) {
+    throw new MetaTokenError('Meta không trả về app-scoped User ID hợp lệ từ /me.', { code: 100, httpStatus: 400 });
+  }
+
+  let permissions: string[] = [];
+  try {
+    const rows = await graphListWithToken(token, 'me/permissions', 'permission,status');
+    permissions = rows
+      .filter((row) => text(row.status).toLowerCase() === 'granted')
+      .map((row) => text(row.permission))
+      .filter(Boolean)
+      .sort();
+  } catch (error) {
+    warnings.push(`me/permissions: ${classifyMetaTokenError(error).reason}`);
+  }
+
+  let pages: ManagedPage[] = [];
+  try {
+    const rows = await graphListWithToken(token, 'me/accounts', 'id,name,tasks');
+    const map = new Map<string, ManagedPage>();
+    for (const row of rows) {
+      const id = text(row.id);
+      if (!/^\d{5,30}$/.test(id)) continue;
+      map.set(id, {
+        id,
+        name: text(row.name) || 'Facebook Page',
+        tasks: Array.isArray(row.tasks) ? row.tasks.map(String) : [],
+      });
+    }
+    pages = Array.from(map.values());
+  } catch (error) {
+    warnings.push(`me/accounts: ${classifyMetaTokenError(error).reason}`);
+  }
+
+  if (debug?.userId && debug.userId !== meId) {
+    warnings.push(`debug_token.user_id (${debug.userId}) khác /me.id (${meId}). Dùng /me.id cho mọi call tạo tài nguyên.`);
+  }
+
+  return {
+    debug,
+    me: { id: meId, name: meName },
+    permissions,
+    pages,
+    warnings,
+  };
+}
+
+export async function createBusinessFromToken(
+  rawToken: string,
+  input: {
+    name: string;
+    vertical: string;
+    primaryPage: string;
+    timezoneId: number | string;
+    requireListedPage?: boolean;
+  },
+): Promise<CreatedBusiness> {
+  const token = cleanMetaToken(rawToken);
+  const inspection = await inspectUserToken(token);
+  const selectedPage = inspection.pages.find((page) => page.id === input.primaryPage);
+
+  if (input.requireListedPage !== false && !selectedPage) {
+    throw new MetaTokenError(
+      inspection.pages.length
+        ? 'Page đã chọn không nằm trong GET /me/accounts của token.'
+        : 'Token hợp lệ nhưng GET /me/accounts không trả Page. Meta yêu cầu primary_page khi tạo BM.',
+      { code: 100, httpStatus: 400 },
+    );
+  }
+
+  if (inspection.permissions.length) {
+    const missing = ['business_management', 'pages_show_list'].filter((permission) => !inspection.permissions.includes(permission));
+    if (missing.length) {
+      const error = new MetaTokenError(`Token thiếu quyền bắt buộc: ${missing.join(', ')}.`, { code: 200, httpStatus: 400 });
+      error.name = 'MetaPermissionPreflightError';
+      throw error;
+    }
+  }
+
+  const created = await graphPostWithToken(token, `${inspection.me.id}/businesses`, {
+    name: input.name,
+    vertical: input.vertical,
+    primary_page: input.primaryPage,
+    timezone_id: String(input.timezoneId),
+  });
+
+  const businessId = text(created.id);
+  if (!/^\d{5,30}$/.test(businessId)) {
+    throw new MetaTokenError('Meta đã phản hồi nhưng không trả Business ID.', { code: 502, httpStatus: 502 });
+  }
+
+  let business: MetaObject = {};
+  try {
+    business = await graphWithToken(token, businessId, {
+      fields: 'id,name,verification_status,created_time,timezone_id,primary_page,created_by',
+    });
+  } catch {
+    business = { id: businessId, name: input.name };
+  }
+
+  const primaryPage = objectValue(business.primary_page);
+  const createdBy = objectValue(business.created_by);
+  const verificationStatus = text(business.verification_status) || 'unknown';
+
+  return {
+    id: businessId,
+    name: text(business.name) || input.name,
+    verificationStatus,
+    verified: verificationStatus.toLowerCase() === 'verified',
+    createdTime: text(business.created_time) || new Date().toISOString(),
+    timezoneId: text(business.timezone_id) || String(input.timezoneId),
+    primaryPage: {
+      id: text(primaryPage.id) || input.primaryPage,
+      name: text(primaryPage.name) || selectedPage?.name || input.primaryPage,
+    },
+    createdBy: {
+      id: text(createdBy.id) || inspection.me.id,
+      name: text(createdBy.name) || inspection.me.name,
+    },
+    raw: business,
+    inspection,
+  };
 }
 
 export function classifyMetaTokenError(error: unknown): {
@@ -215,7 +454,9 @@ export function classifyMetaTokenError(error: unknown): {
     ([100, 190].includes(code || -1) && /error loading application|invalid request|cannot load application|application.*load/.test(lower));
 
   let status: MetaTokenStatus = 'unknown_error';
-  if (apiContextRejected && !clearlyExpired) {
+  if (error instanceof Error && error.name === 'MetaPermissionPreflightError') {
+    status = 'permission_issue';
+  } else if (apiContextRejected && !clearlyExpired) {
     status = 'permission_issue';
   } else if (code === 190 || /access token.*(invalid|expired)|invalid oauth|session.*expired|token.*expired/.test(lower)) {
     status = 'invalid';

@@ -100,9 +100,9 @@ export async function graph(path: string, params: Record<string, string> = {}) {
 
   const url = new URL(`https://graph.facebook.com/${connection.version}/${path}`);
   for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
+  url.searchParams.set('access_token', connection.token);
 
   const response = await fetch(url, {
-    headers: { Authorization: `Bearer ${connection.token}` },
     signal: AbortSignal.timeout(25000),
   });
   const body = (await response.json()) as GraphBody;
@@ -116,13 +116,14 @@ export async function graphPost(path: string, params: Record<string, string>) {
     throw new Error('Chưa kết nối Meta. Cần cấu hình META_ACCESS_TOKEN trên máy chủ.');
   }
 
+  const body = new URLSearchParams(params);
+  body.set('access_token', connection.token);
   const response = await fetch(`https://graph.facebook.com/${connection.version}/${path}`, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${connection.token}`,
       'Content-Type': 'application/x-www-form-urlencoded',
     },
-    body: new URLSearchParams(params),
+    body,
     signal: AbortSignal.timeout(25000),
   });
   const body = (await response.json()) as GraphBody;

@@ -5,7 +5,8 @@ import {
   encryptToken,
   getMetaTokenSecret,
   getMetaTokens,
-  graphWithToken,
+  graphListWithToken,
+  inspectUserToken,
   publicToken,
   tokenFingerprint,
   type MetaTokenRecord,
@@ -13,10 +14,6 @@ import {
 } from '../../../lib/meta-tokens';
 
 type MetaObject = Record<string, unknown>;
-type GraphListResponse = MetaObject & {
-  data?: unknown[];
-  paging?: { cursors?: { after?: string } };
-};
 
 type TokenInventory = {
   id: string;
@@ -63,35 +60,17 @@ function text(value: unknown) {
   return value === undefined || value === null ? '' : String(value).trim();
 }
 
-function objectValue(value: unknown): MetaObject {
-  return value && typeof value === 'object' && !Array.isArray(value) ? value as MetaObject : {};
-}
-
 function inventoryId(workspaceOwner: string, tokenId: string) {
   return `${workspaceOwner}:token-inventory:${tokenId}`;
 }
 
-async function graphListWithToken(token: string, path: string, fields: string) {
-  const rows: MetaObject[] = [];
-  let after = '';
-  for (let page = 0; page < 10; page += 1) {
-    const response = await graphWithToken(token, path, {
-      fields,
-      limit: '100',
-      ...(after ? { after } : {}),
-    }) as GraphListResponse;
-    const pageRows = Array.isArray(response.data) ? response.data.map(objectValue) : [];
-    rows.push(...pageRows);
-    const next = text(response.paging?.cursors?.after);
-    if (!next || pageRows.length === 0) break;
-    after = next;
-  }
-  return rows;
+async function graphListWithTokenLocal(token: string, path: string, fields: string) {
+  return graphListWithToken(token, path, fields, 10);
 }
 
 async function safeList(token: string, path: string, fields: string, warnings: string[]) {
   try {
-    return await graphListWithToken(token, path, fields);
+    return await graphListWithTokenLocal(token, path, fields);
   } catch (error) {
     const classified = classifyMetaTokenError(error);
     warnings.push(`${path}: ${classified.reason}`);
@@ -101,7 +80,7 @@ async function safeList(token: string, path: string, fields: string, warnings: s
 
 async function readPermissions(token: string, warnings: string[]) {
   try {
-    const rows = await graphListWithToken(token, 'me/permissions', 'permission,status');
+    const rows = await graphListWithTokenLocal(token, 'me/permissions', 'permission,status');
     return rows
       .filter((row) => text(row.status).toLowerCase() === 'granted')
       .map((row) => text(row.permission))
@@ -125,13 +104,16 @@ async function scanToken(workspaceOwner: string, record: MetaTokenRecord, token:
   const now = new Date().toISOString();
   const warnings: string[] = [];
   try {
-    const me = await graphWithToken(token, 'me', { fields: 'id,name' }) as MetaObject;
-    const [permissions, businesses, pages, adAccounts] = await Promise.all([
-      readPermissions(token, warnings),
+    const inspection = await inspectUserToken(token);
+    warnings.push(...inspection.warnings);
+    const [businesses, adAccounts] = await Promise.all([
       safeList(token, 'me/businesses', 'id,name,verification_status', warnings),
-      safeList(token, 'me/accounts', 'id,name', warnings),
       safeList(token, 'me/adaccounts', 'id,name,account_status,disable_reason', warnings),
     ]);
+    const pages = inspection.pages;
+    const permissions = inspection.permissions.length
+      ? inspection.permissions
+      : await readPermissions(token, warnings);
 
     const liveAdCount = adAccounts.filter((account) => adBucket(account.account_status) === 'live').length;
     const dieAdCount = adAccounts.filter((account) => adBucket(account.account_status) === 'die').length;
@@ -140,8 +122,8 @@ async function scanToken(workspaceOwner: string, record: MetaTokenRecord, token:
       id: inventoryId(workspaceOwner, record.id),
       tokenId: record.id,
       status: 'active',
-      metaUserId: text(me.id),
-      metaUserName: text(me.name),
+      metaUserId: inspection.me.id,
+      metaUserName: inspection.me.name,
       permissions,
       businessCount: businesses.length,
       verifiedBusinessCount: businesses.filter((business) => text(business.verification_status).toLowerCase() === 'verified').length,
