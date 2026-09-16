@@ -310,20 +310,33 @@ export default function MixedCredentialImport() {
       }));
       const tokenItems = parsed.filter((item) => item.token).map((item) => ({
         label: item.label || (item.uid ? `UID ${item.uid}` : undefined),
+        uid: item.uid,
         token: item.token as string,
       }));
 
       let newSessions = 0;
       let updatedSessions = 0;
+      let liveSessions = 0;
+      const savedSessionIds: string[] = [];
       for (let index = 0; index < cookieItems.length; index += 50) {
         const chunk = cookieItems.slice(index, index + 50);
-        const data = await jsonFetch<{ imported?: number; updated?: number }>('/api/session-vault', {
+        const data = await jsonFetch<{ imported?: number; updated?: number; sessions?: SessionMeta[] }>('/api/session-vault', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action: 'import', items: chunk }),
         });
         newSessions += data.imported || 0;
         updatedSessions += data.updated || 0;
+        savedSessionIds.push(...(data.sessions || []).map((session) => session.id));
+      }
+
+      if (savedSessionIds.length) {
+        const checked = await jsonFetch<{ live?: number }>('/api/session-vault', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'check', ids: savedSessionIds.slice(0, 50) }),
+        });
+        liveSessions = checked.live || 0;
       }
 
       let checkedTokens = 0;
@@ -353,7 +366,7 @@ export default function MixedCredentialImport() {
         }
       }
 
-      setMessage(`Đã xử lý ${parsed.length} dòng · session mới ${newSessions} · cập nhật ${updatedSessions} · token check ${checkedTokens} · LIVE ${liveTokens} · tài nguyên ${syncedResources}.`);
+      setMessage(`Đã xử lý ${parsed.length} dòng · session mới ${newSessions} · cập nhật ${updatedSessions} · session LIVE ${liveSessions} · token check ${checkedTokens} · LIVE ${liveTokens} · tài nguyên ${syncedResources}.`);
       setText('');
       setFileName('');
       if (inputRef.current) inputRef.current.value = '';

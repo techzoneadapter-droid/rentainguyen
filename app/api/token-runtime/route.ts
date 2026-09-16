@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import type { Asset } from '../../../lib/data';
 import { audit, db, list, owner, put } from '../../../lib/server';
+import { inspectAccount } from '../../../lib/account-inspect';
+import { getSessionCookieByUid, uidFromLabel } from '../../../lib/credential-vault';
 import {
   classifyMetaTokenError,
   cleanMetaToken,
@@ -8,7 +10,6 @@ import {
   getMetaTokenSecret,
   getMetaTokens,
   graphListWithToken,
-  inspectUserToken,
   MetaTokenError,
   publicToken,
   tokenFingerprint,
@@ -44,6 +45,7 @@ const importSchema = z.object({
   action: z.literal('import'),
   items: z.array(z.object({
     label: z.string().trim().max(80).optional(),
+    uid: z.string().trim().regex(/^\d{5,30}$/).optional(),
     token: z.string().trim().min(20).max(4096),
   })).min(1).max(20),
 });
@@ -116,18 +118,42 @@ async function scanToken(workspaceOwner: string, record: MetaTokenRecord, rawTok
   if (!token || token.length < 20) {
     throw new MetaTokenError('Token trống hoặc quá ngắn sau khi làm sạch ký tự xuống dòng/khoảng trắng.', { code: 400, httpStatus: 400 });
   }
+  const uidHint = record.metaUserId || uidFromLabel(record.label);
+  let cookie = '';
   try {
-    const inspection = await inspectUserToken(token);
+    cookie = await getSessionCookieByUid(workspaceOwner, uidHint);
+  } catch (error) {
+    warnings.push(`Cookie vault: ${(error as Error).message}`);
+  }
+  try {
+    const inspection = await inspectAccount({ token, cookie: cookie || undefined });
     warnings.push(...inspection.warnings);
     if (inspection.debug) {
       if (inspection.debug.appId) warnings.push(`debug_token.app_id=${inspection.debug.appId}`);
       if (inspection.debug.type) warnings.push(`debug_token.type=${inspection.debug.type}`);
     }
+    if (inspection.source !== 'graph') warnings.push(`Nguồn check: ${inspection.source}.`);
 
-    const [businesses, directAds] = await Promise.all([
-      safeList(token, `${inspection.me.id}/businesses`, 'id,name,verification_status', warnings),
-      safeList(token, `${inspection.me.id}/adaccounts`, 'id,name,account_status,disable_reason', warnings),
-    ]);
+    const graphToken = inspection.workingToken || token;
+    let businesses = inspection.businesses.map((item) => ({
+      id: item.id,
+      name: item.name,
+      verification_status: item.verificationStatus || 'unknown',
+    })) as MetaObject[];
+    let directAds = inspection.adAccounts.map((item) => ({
+      id: item.id,
+      name: item.name,
+      account_status: item.accountStatus || 1,
+    })) as MetaObject[];
+
+    if (inspection.source !== 'cookie') {
+      const [graphBusinesses, graphAds] = await Promise.all([
+        safeList(graphToken, `${inspection.me.id}/businesses`, 'id,name,verification_status', warnings),
+        safeList(graphToken, `${inspection.me.id}/adaccounts`, 'id,name,account_status,disable_reason', warnings),
+      ]);
+      if (graphBusinesses.length) businesses = graphBusinesses;
+      if (graphAds.length) directAds = graphAds;
+    }
 
     const pageMap = uniqueIds(inspection.pages as unknown as MetaObject[]);
     for (const page of inspection.pages) pageMap.set(page.id, page as unknown as MetaObject);
@@ -137,12 +163,13 @@ async function scanToken(workspaceOwner: string, record: MetaTokenRecord, rawTok
     for (const business of businesses) {
       const businessId = text(business.id);
       if (!/^\d{5,30}$/.test(businessId)) continue;
+      if (inspection.source === 'cookie') continue;
       const [ownedAds, clientAds, ownedPages, clientPages, pixels] = await Promise.all([
-        safeList(token, `${businessId}/owned_ad_accounts`, 'id,name,account_status,disable_reason', warnings),
-        safeList(token, `${businessId}/client_ad_accounts`, 'id,name,account_status,disable_reason', warnings),
-        safeList(token, `${businessId}/owned_pages`, 'id,name', warnings),
-        safeList(token, `${businessId}/client_pages`, 'id,name', warnings),
-        safeList(token, `${businessId}/adspixels`, 'id,name', warnings),
+        safeList(graphToken, `${businessId}/owned_ad_accounts`, 'id,name,account_status,disable_reason', warnings),
+        safeList(graphToken, `${businessId}/client_ad_accounts`, 'id,name,account_status,disable_reason', warnings),
+        safeList(graphToken, `${businessId}/owned_pages`, 'id,name', warnings),
+        safeList(graphToken, `${businessId}/client_pages`, 'id,name', warnings),
+        safeList(graphToken, `${businessId}/adspixels`, 'id,name', warnings),
       ]);
       for (const [id, row] of uniqueIds([...ownedAds, ...clientAds], (value) => value.replace(/^act_/, ''))) adMap.set(id, row);
       for (const [id, row] of uniqueIds([...ownedPages, ...clientPages])) pageMap.set(id, row);
@@ -178,8 +205,8 @@ async function scanToken(workspaceOwner: string, record: MetaTokenRecord, rawTok
       put(workspaceOwner, 'token-inventory', inventory),
       put(workspaceOwner, 'meta-token', {
         ...record,
-        encrypted: await encryptToken(token),
-        fingerprint: await tokenFingerprint(token),
+        encrypted: await encryptToken(graphToken),
+        fingerprint: await tokenFingerprint(graphToken),
         status: 'active',
         metaUserId: inventory.metaUserId || record.metaUserId,
         metaUserName: inventory.metaUserName || record.metaUserName,
@@ -296,10 +323,11 @@ export async function POST(req: Request) {
           const now = new Date().toISOString();
           record = {
             id: crypto.randomUUID(),
-            label: item.label || `Token ${existing.length + imported + 1}`,
+            label: item.label || (item.uid ? `UID ${item.uid}` : `Token ${existing.length + imported + 1}`),
             encrypted: await encryptToken(token),
             fingerprint,
             status: 'unknown_error',
+            metaUserId: item.uid,
             created: now,
             updated: now,
           };
@@ -310,6 +338,7 @@ export async function POST(req: Request) {
             label: item.label || record.label,
             encrypted: await encryptToken(token),
             fingerprint,
+            metaUserId: item.uid || record.metaUserId,
             lastError: undefined,
             lastErrorCode: undefined,
             lastErrorSubcode: undefined,
