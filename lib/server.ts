@@ -116,14 +116,14 @@ export async function graphPost(path: string, params: Record<string, string>) {
     throw new Error('Chưa kết nối Meta. Cần cấu hình META_ACCESS_TOKEN trên máy chủ.');
   }
 
-  const body = new URLSearchParams(params);
-  body.set('access_token', connection.token);
+  const form = new URLSearchParams(params);
+  form.set('access_token', connection.token);
   const response = await fetch(`https://graph.facebook.com/${connection.version}/${path}`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/x-www-form-urlencoded',
     },
-    body,
+    body: form,
     signal: AbortSignal.timeout(25000),
   });
   const body = (await response.json()) as GraphBody;

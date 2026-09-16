@@ -360,6 +360,7 @@ export default function ResourceConsoleV5() {
     setBusy(true); setError(''); setMessage('');
     try {
       const active = new Set<string>(); let imported = 0; let reused = 0; let resources = 0; let rejected = 0;
+      const syncErrors: string[] = [];
       for (let index = 0; index < items.length; index += 20) {
         const chunk = items.slice(index, index + 20);
         setProgress(`Đang check token ${index + 1}–${index + chunk.length}/${items.length}…`);
@@ -373,9 +374,14 @@ export default function ResourceConsoleV5() {
         }
       }
       const ids = [...active];
-      for (let i = 0; i < ids.length; i += 1) { setProgress(`Token LIVE ${i + 1}/${ids.length}: đồng bộ tài nguyên…`); resources += await syncToken(ids[i]); }
+      for (let i = 0; i < ids.length; i += 1) {
+        setProgress(`Token LIVE ${i + 1}/${ids.length}: đồng bộ tài nguyên…`);
+        try { resources += await syncToken(ids[i]); }
+        catch (syncError) { syncErrors.push((syncError as Error).message); }
+      }
       await loadAll(); setTokenText(''); setFileName(''); if (fileInputRef.current) fileInputRef.current.value = '';
-      setMessage(`Xong: ${items.length} token · mới ${imported} · dùng lại ${reused} · LIVE ${active.size} · API không nhận ${rejected} · ${resources} tài nguyên.`);
+      setMessage(`Xong: ${items.length} token · mới ${imported} · dùng lại ${reused} · LIVE ${active.size} · API không nhận ${rejected} · ${resources} tài nguyên.${syncErrors.length ? ` ${syncErrors.length} token chưa đồng bộ xong.` : ''}`);
+      if (syncErrors.length) setError(`Đồng bộ tài nguyên: ${syncErrors[0]}`);
     } catch (err) { setError((err as Error).message); }
     finally { setBusy(false); setProgress(''); }
   }
@@ -386,6 +392,7 @@ export default function ResourceConsoleV5() {
     try {
       let activeCount = 0;
       let rejectedCount = 0;
+      const syncErrors: string[] = [];
       for (let i = 0; i < ids.length; i += 20) {
         const chunk = ids.slice(i, i + 20);
         setProgress(`Check token ${i + 1}–${i + chunk.length}/${ids.length}…`);
@@ -393,11 +400,16 @@ export default function ResourceConsoleV5() {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'scan', ids: chunk }),
         });
         for (const item of data.inventories || []) {
-          if (item.status === 'active') { activeCount += 1; await syncToken(item.tokenId); }
+          if (item.status === 'active') {
+            activeCount += 1;
+            try { await syncToken(item.tokenId); }
+            catch (syncError) { syncErrors.push((syncError as Error).message); }
+          }
           if (item.status === 'permission_issue') rejectedCount += 1;
         }
       }
-      await loadAll(); setMessage(`Đã check xong: ${activeCount} LIVE, ${rejectedCount} token API không nhận.`);
+      await loadAll(); setMessage(`Đã check xong: ${activeCount} LIVE, ${rejectedCount} token API không nhận.${syncErrors.length ? ` ${syncErrors.length} token chưa đồng bộ xong.` : ''}`);
+      if (syncErrors.length) setError(`Đồng bộ tài nguyên: ${syncErrors[0]}`);
     } catch (err) { setError((err as Error).message); }
     finally { setBusy(false); setProgress(''); }
   }
@@ -515,10 +527,12 @@ export default function ResourceConsoleV5() {
 
   async function prepareBm() {
     if (!selectedToken) { setError('Chọn token LIVE trước.'); return; }
-    setBusy(true); setError('');
+    setBusy(true); setError(''); setBmReady(false); setBmPages([]); setBmPage('');
     try {
       const data = await jsonFetch<{ pages?: PageItem[] }>('/api/business-manager?tokenId=' + encodeURIComponent(selectedToken), { cache: 'no-store' });
-      setBmPages(data.pages || []); setBmPage(data.pages?.[0]?.id || ''); setBmReady(true);
+      const pages = data.pages || [];
+      setBmPages(pages); setBmPage(pages[0]?.id || ''); setBmReady(pages.length > 0);
+      if (!pages.length) setError('GET /me/accounts không trả Page để dùng làm primary_page.');
     } catch (err) { setError((err as Error).message); }
     finally { setBusy(false); }
   }
@@ -531,7 +545,13 @@ export default function ResourceConsoleV5() {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ tokenId: selectedToken, name: bmName, primaryPage: bmPage, timezone: Number(bmTimezone), vertical: bmVertical, adminEmail: '', purposeConfirmed: true }),
       });
-      await syncToken(selectedToken); await loadAll(); setMessage(data.message || 'Đã tạo BM.'); setBmName('');
+      setMessage(data.message || 'Đã tạo BM.'); setBmName('');
+      try {
+        await syncToken(selectedToken);
+      } catch (syncError) {
+        setError(`BM đã được tạo trên Meta, nhưng đồng bộ tài nguyên chưa xong: ${(syncError as Error).message}`);
+      }
+      await loadAll();
     } catch (err) { setError((err as Error).message); }
     finally { setBusy(false); }
   }
@@ -641,7 +661,7 @@ export default function ResourceConsoleV5() {
   }
 
   function renderTokenTab() {
-    return <><div className={styles.pageHead}><div><div className={styles.kicker}>TOKEN CENTER</div><h2>Nạp token → check → đồng bộ tài nguyên</h2><p>Token extension/session có thể còn chạy trong trình duyệt nhưng backend chỉ dùng được token mà Meta Graph API chấp nhận.</p></div><div className={styles.actions}><button className={styles.secondary} onClick={()=>void scanTokens(tokens.map((t)=>t.id))} disabled={busy||!tokens.length}><RefreshCw size={14}/> Check tất cả token</button></div></div>{alerts()}<div className={styles.tokenImport}><div><label>Token / danh sách token</label><textarea value={tokenText} onChange={(e)=>setTokenText(e.target.value)} placeholder="Dán token, tên|token, CSV, JSON hoặc access_token=..."/></div><label className={styles.fileBox}><input ref={fileInputRef} type="file" onChange={(e)=>void onTokenFile(e.target.files?.[0]||null)}/><FileUp size={28}/><strong>{fileName||'Chọn file token'}</strong><span>Mọi file text; UTF-8/UTF-16.</span></label><button onClick={()=>void importCheckAndSync()} disabled={busy}><BadgeCheck size={15}/>{busy?'Đang xử lý…':'Nạp + Check + Đồng bộ'}</button></div><div className={styles.tokenList}><div className={styles.sectionHead}><div><strong>Kho token</strong><span>{tokens.length} token · {liveTokens.length} LIVE</span></div></div>{tokens.map((token)=><div className={styles.tokenRow} key={token.id}><div className={styles.tokenName}><span className={token.status==='active'?styles.liveDot:styles.deadDot}/><div><strong>{token.metaUserName?`${token.metaUserName} - ${token.metaUserId||''}`:token.label}</strong><small>{token.lastError||token.inventory?.warnings?.[0]||'Chưa có lỗi.'}</small></div></div><span className={statusClass(token.status)}>{STATUS_TEXT[token.status]}</span><div className={styles.resourceMini}><span>BM <b>{token.inventory?.businessCount||0}</b></span><span>ADS <b>{token.inventory?.adAccountCount||0}</b></span><span>Page <b>{token.inventory?.pageCount||0}</b></span></div><div style={{display:'flex',gap:6,justifyContent:'flex-end',flexWrap:'wrap'}}><button className={styles.ghost} onClick={()=>void scanTokens([token.id])} disabled={busy}><ShieldCheck size={13}/> Check</button><button className={styles.ghost} onClick={()=>void renameToken(token)} disabled={busy}>Sửa</button><button className={styles.ghost} onClick={()=>void deleteToken(token)} disabled={busy}><Trash2 size={13}/> Xóa</button></div></div>)}</div></>;
+    return <><div className={styles.pageHead}><div><div className={styles.kicker}>TOKEN CENTER</div><h2>Nạp token → check → đồng bộ tài nguyên</h2><p>Token extension/session có thể còn chạy trong trình duyệt nhưng backend chỉ dùng được token mà Meta Graph API chấp nhận.</p></div><div className={styles.actions}><button className={styles.secondary} onClick={()=>void scanTokens(tokens.map((t)=>t.id))} disabled={busy||!tokens.length}><RefreshCw size={14}/> Check tất cả token</button></div></div>{alerts()}<div className={styles.tokenImport}><div><label>Token / danh sách token</label><textarea value={tokenText} onChange={(e)=>setTokenText(e.target.value)} placeholder="Dán token, tên|token, CSV, JSON hoặc access_token=..."/></div><label className={styles.fileBox}><input ref={fileInputRef} type="file" onChange={(e)=>void onTokenFile(e.target.files?.[0]||null)}/><FileUp size={28}/><strong>{fileName||'Chọn file token'}</strong><span>Mọi file text; UTF-8/UTF-16.</span></label><button onClick={()=>void importCheckAndSync()} disabled={busy}><BadgeCheck size={15}/>{busy?'Đang xử lý…':'Nạp + Check + Đồng bộ'}</button></div><div className={styles.tokenList}><div className={styles.sectionHead}><div><strong>Kho token</strong><span>{tokens.length} token · {liveTokens.length} LIVE</span></div></div>{tokens.map((token)=><div className={styles.tokenRow} key={token.id}><div className={styles.tokenName}><span className={token.status==='active'?styles.liveDot:styles.deadDot}/><div><strong>{token.metaUserName?`${token.metaUserName} - ${token.metaUserId||''}`:token.label}</strong><small>{token.lastError||token.inventory?.warnings?.[0]||'Chưa có lỗi.'}</small>{token.inventory && <details className={styles.scopeDetails}><summary>Quyền ({token.inventory.permissions.length})</summary><div>{token.inventory.permissions.length ? token.inventory.permissions.map((permission)=><span key={permission}>{permission}</span>) : 'Không đọc được quyền từ Graph'}</div></details>}</div></div><span className={statusClass(token.status)}>{STATUS_TEXT[token.status]}</span><div className={styles.resourceMini}><span>BM <b>{token.inventory?.businessCount||0}</b></span><span>ADS <b>{token.inventory?.adAccountCount||0}</b></span><span>Page <b>{token.inventory?.pageCount||0}</b></span></div><div style={{display:'flex',gap:6,justifyContent:'flex-end',flexWrap:'wrap'}}><button className={styles.ghost} onClick={()=>void scanTokens([token.id])} disabled={busy}><ShieldCheck size={13}/> Check</button><button className={styles.ghost} onClick={()=>void renameToken(token)} disabled={busy}>Sửa</button><button className={styles.ghost} onClick={()=>void deleteToken(token)} disabled={busy}><Trash2 size={13}/> Xóa</button></div></div>)}</div></>;
   }
 
   function renderBmCreate() {

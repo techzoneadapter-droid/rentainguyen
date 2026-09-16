@@ -223,6 +223,8 @@ export async function POST(req: Request) {
     if (input.action === 'import') {
       const existing = await getMetaTokens(workspaceOwner);
       const byFingerprint = new Map(existing.map((record) => [record.fingerprint, record] as const));
+      const existingInventories = await list(workspaceOwner, 'token-inventory') as TokenInventory[];
+      const byTokenId = new Map(existingInventories.map((inventory) => [inventory.tokenId, inventory] as const));
       let imported = 0;
       let reused = 0;
 
@@ -246,12 +248,17 @@ export async function POST(req: Request) {
           imported += 1;
         } else {
           reused += 1;
+          const previous = byTokenId.get(record.id);
+          if (previous) {
+            inventories.push(previous);
+            continue;
+          }
         }
         const now = new Date().toISOString();
         const inventory: TokenInventory = {
           id: inventoryId(workspaceOwner, record.id),
           tokenId: record.id,
-          status: record.status,
+          status: 'unknown_error',
           permissions: [],
           businessCount: 0,
           verifiedBusinessCount: 0,

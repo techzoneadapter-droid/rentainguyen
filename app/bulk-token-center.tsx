@@ -237,7 +237,7 @@ export default function BulkTokenCenter() {
       let reused = 0;
       for (let index = 0; index < items.length; index += 20) {
         const chunk = items.slice(index, index + 20);
-        setProgress(`Đang kiểm tra ${processed + 1}–${processed + chunk.length}/${items.length}…`);
+        setProgress(`Đang lưu ${processed + 1}–${processed + chunk.length}/${items.length} token…`);
         const response = await fetch('/api/token-inventory', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -249,7 +249,7 @@ export default function BulkTokenCenter() {
         reused += data.reused || 0;
         processed += chunk.length;
       }
-      setMessage(`Đã phân loại ${processed} token · mới ${imported} · đã có ${reused}. Raw token không được hiển thị lại.`);
+      setMessage(`Đã lưu ${processed} token · mới ${imported} · đã có ${reused}. Bấm Check ở dòng token để đọc trạng thái, quyền và tài nguyên từ Graph.`);
       setFile(null);
       setFileCount(0);
       setAuthorized(false);
@@ -458,7 +458,7 @@ export default function BulkTokenCenter() {
             <input type="file" accept=".txt,.csv,text/plain,text/csv" onChange={(event) => void onFileChange(event.target.files?.[0] || null)} />
             <div className={styles.hint}>{file ? `${file.name} · nhận diện ${fileCount} token` : 'Chưa chọn file'}</div>
             <label className={styles.confirm}><input type="checkbox" checked={authorized} onChange={(event) => setAuthorized(event.target.checked)} /><span>Tôi xác nhận các token thuộc tài khoản/BM tôi quản lý hoặc đã được chủ tài khoản ủy quyền.</span></label>
-            <button className={`${styles.miniButton} ${styles.primary}`} type="button" disabled={busy || !fileCount || !authorized} onClick={() => void importFile()}>{busy ? <LoaderCircle size={15} className="spin" /> : <ShieldCheck size={15} />} Kiểm tra & phân loại</button>
+            <button className={`${styles.miniButton} ${styles.primary}`} type="button" disabled={busy || !fileCount || !authorized} onClick={() => void importFile()}>{busy ? <LoaderCircle size={15} className="spin" /> : <ShieldCheck size={15} />} Nạp token</button>
           </div>
           <div>
             <strong>Quyền token được dùng thế nào</strong>

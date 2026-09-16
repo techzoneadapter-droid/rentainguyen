@@ -270,7 +270,7 @@ export async function graphListWithToken(token: string, path: string, fields: st
   let after = '';
   for (let page = 0; page < maxPages; page += 1) {
     const response = await graphWithToken(token, path, {
-      fields,
+      ...(fields ? { fields } : {}),
       limit: '100',
       ...(after ? { after } : {}),
     });
@@ -308,9 +308,6 @@ export async function inspectUserToken(rawToken: string): Promise<TokenInspectio
   const token = cleanMetaToken(rawToken);
   const warnings: string[] = [];
   const debug = await debugUserToken(token);
-  if (debug && !debug.isValid) {
-    throw new MetaTokenError('Meta debug_token trả về is_valid=false.', { code: 190, httpStatus: 400 });
-  }
 
   const meBody = await graphWithToken(token, 'me', { fields: 'id,name' });
   const meId = text(meBody.id);
@@ -318,10 +315,18 @@ export async function inspectUserToken(rawToken: string): Promise<TokenInspectio
   if (!/^\d{5,30}$/.test(meId)) {
     throw new MetaTokenError('Meta không trả về app-scoped User ID hợp lệ từ /me.', { code: 100, httpStatus: 400 });
   }
+  if (debug && !debug.isValid) {
+    warnings.push('debug_token trả về is_valid=false, nhưng GET /me vẫn xác nhận user. Dùng kết quả /me để xác định token LIVE.');
+  }
 
   let permissions: string[] = [];
   try {
-    const rows = await graphListWithToken(token, 'me/permissions', 'permission,status', 5);
+    let rows: MetaObject[];
+    try {
+      rows = await graphListWithToken(token, 'me/permissions', 'permission,status', 5);
+    } catch {
+      rows = await graphListWithToken(token, 'me/permissions', '', 5);
+    }
     permissions = rows
       .filter((row) => text(row.status).toLowerCase() === 'granted')
       .map((row) => text(row.permission))
@@ -333,7 +338,13 @@ export async function inspectUserToken(rawToken: string): Promise<TokenInspectio
 
   let pages: ManagedPage[] = [];
   try {
-    const rows = await graphListWithToken(token, 'me/accounts', 'id,name,tasks');
+    let rows: MetaObject[];
+    try {
+      rows = await graphListWithToken(token, 'me/accounts', 'id,name,tasks');
+    } catch {
+      rows = await graphListWithToken(token, 'me/accounts', 'id,name');
+      warnings.push('me/accounts không trả tasks; vẫn dùng id và name của Page để chọn primary_page.');
+    }
     const map = new Map<string, ManagedPage>();
     for (const row of rows) {
       const id = text(row.id);
