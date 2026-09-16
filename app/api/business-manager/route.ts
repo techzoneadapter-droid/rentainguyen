@@ -2,9 +2,10 @@ import { z } from 'zod';
 import { audit, config, db, owner, put } from '../../../lib/server';
 import {
   classifyMetaTokenError,
+  createBusinessFromToken,
   getMetaTokenSecret,
   graphPostWithToken,
-  graphWithToken,
+  inspectUserToken,
   publicToken,
   updateMetaToken,
 } from '../../../lib/meta-tokens';
@@ -26,8 +27,6 @@ const createSchema = z.object({
   purposeConfirmed: z.literal(true),
 });
 
-type MetaObject = Record<string, unknown>;
-
 type InviteResult = {
   requested: boolean;
   email?: string;
@@ -38,14 +37,6 @@ type InviteResult = {
 function sameOrigin(req: Request) {
   const origin = req.headers.get('origin');
   return !origin || origin === new URL(req.url).origin;
-}
-
-function objectValue(value: unknown): MetaObject {
-  return value && typeof value === 'object' && !Array.isArray(value) ? value as MetaObject : {};
-}
-
-function stringValue(value: unknown) {
-  return value === undefined || value === null ? '' : String(value);
 }
 
 export async function GET(req: Request) {
@@ -61,28 +52,23 @@ export async function GET(req: Request) {
 
     const source = await getMetaTokenSecret(workspaceOwner, tokenId);
     try {
-      const response = await graphWithToken(source.token, 'me/accounts', {
-        fields: 'id,name,tasks',
-        limit: '100',
-      });
-      const rows = Array.isArray(response.data) ? response.data : [];
-      const pages = rows
-        .map((row) => objectValue(row))
-        .map((row) => ({
-          id: stringValue(row.id),
-          name: stringValue(row.name) || 'Facebook Page',
-          tasks: Array.isArray(row.tasks) ? row.tasks.map(String) : [],
-        }))
-        .filter((page) => /^\d{5,30}$/.test(page.id));
-
+      const inspection = await inspectUserToken(source.token);
       const updated = await updateMetaToken(workspaceOwner, source.record, {
         status: 'active',
+        metaUserId: inspection.me.id,
+        metaUserName: inspection.me.name,
         lastCheckedAt: new Date().toISOString(),
         lastError: undefined,
         lastErrorCode: undefined,
         lastErrorSubcode: undefined,
       });
-      return Response.json({ pages, token: publicToken(updated) });
+      return Response.json({
+        pages: inspection.pages,
+        user: inspection.me,
+        debug: inspection.debug,
+        warnings: inspection.warnings,
+        token: publicToken(updated),
+      });
     } catch (error) {
       const classified = classifyMetaTokenError(error);
       const updated = await updateMetaToken(workspaceOwner, source.record, {
@@ -97,7 +83,7 @@ export async function GET(req: Request) {
           error: classified.reason,
           tokenStatus: classified.status,
           token: publicToken(updated),
-          hint: 'Để app tự liệt kê Page, token cần quyền pages_show_list. Bạn vẫn có thể nhập Page ID thủ công nếu token có quyền hợp lệ với Page đó.',
+          hint: 'Preflight token-only: debug_token → GET /me → GET /me/accounts. Page phải nằm trong /me/accounts.',
         },
         { status: 400 },
       );
@@ -118,78 +104,15 @@ export async function POST(req: Request) {
     const adminEmail = input.adminEmail || undefined;
     const source = await getMetaTokenSecret(workspaceOwner, input.tokenId);
     let currentRecord = source.record;
-    const token = source.token;
     const now = new Date().toISOString();
 
-    let me: MetaObject;
+    let created;
     try {
-      me = await graphWithToken(token, 'me', { fields: 'id,name' });
-      currentRecord = await updateMetaToken(workspaceOwner, currentRecord, {
-        status: 'active',
-        metaUserId: stringValue(me.id),
-        metaUserName: stringValue(me.name),
-        lastCheckedAt: now,
-        lastUsedAt: now,
-        lastError: undefined,
-        lastErrorCode: undefined,
-        lastErrorSubcode: undefined,
-      });
-    } catch (error) {
-      const classified = classifyMetaTokenError(error);
-      const updated = await updateMetaToken(workspaceOwner, currentRecord, {
-        status: classified.status,
-        lastCheckedAt: now,
-        lastUsedAt: now,
-        lastCreateAt: now,
-        lastCreateResult: 'failed_before_create',
-        lastError: classified.reason,
-        lastErrorCode: classified.code,
-        lastErrorSubcode: classified.subcode,
-      });
-      return Response.json(
-        { error: classified.reason, tokenStatus: classified.status, token: publicToken(updated) },
-        { status: 400 },
-      );
-    }
-
-    const metaUserId = stringValue(me.id);
-    if (!/^\d{5,30}$/.test(metaUserId)) {
-      throw new Error('Meta không trả về app-scoped User ID hợp lệ.');
-    }
-
-    let pageProbe: MetaObject;
-    try {
-      pageProbe = await graphWithToken(token, input.primaryPage, { fields: 'id,name' });
-      if (stringValue(pageProbe.id) !== input.primaryPage) {
-        throw new Error('Meta trả về Page ID không khớp với Page đã chọn.');
-      }
-    } catch (error) {
-      const classified = classifyMetaTokenError(error);
-      await updateMetaToken(workspaceOwner, currentRecord, {
-        status: classified.status === 'unknown_error' ? currentRecord.status : classified.status,
-        lastUsedAt: now,
-        lastCreateAt: now,
-        lastCreateResult: 'failed_page_precheck',
-        lastError: `Page ${input.primaryPage} không vượt qua bước kiểm tra trước khi tạo BM: ${classified.reason}`,
-        lastErrorCode: classified.code,
-        lastErrorSubcode: classified.subcode,
-      });
-      return Response.json(
-        {
-          error: `Không gửi yêu cầu tạo BM vì Page ${input.primaryPage} không đọc được bằng token đã chọn. ${classified.reason}`,
-          tokenStatus: currentRecord.status,
-        },
-        { status: 400 },
-      );
-    }
-
-    let createResult: MetaObject;
-    try {
-      createResult = await graphPostWithToken(token, `${metaUserId}/businesses`, {
+      created = await createBusinessFromToken(source.token, {
         name: input.name,
         vertical: input.vertical,
-        primary_page: input.primaryPage,
-        timezone_id: String(input.timezone),
+        primaryPage: input.primaryPage,
+        timezoneId: input.timezone,
       });
     } catch (error) {
       const classified = classifyMetaTokenError(error);
@@ -197,7 +120,7 @@ export async function POST(req: Request) {
         status: classified.status === 'unknown_error' ? currentRecord.status : classified.status,
         lastUsedAt: now,
         lastCreateAt: now,
-        lastCreateResult: 'failed',
+        lastCreateResult: classified.status === 'permission_issue' ? 'failed_preflight' : 'failed',
         lastError: classified.reason,
         lastErrorCode: classified.code,
         lastErrorSubcode: classified.subcode,
@@ -206,64 +129,33 @@ export async function POST(req: Request) {
       return Response.json(
         {
           error: opaqueCreateError
-            ? `${classified.reason} App đã xác nhận token và Page đều đọc được trước khi gửi lệnh tạo. Vì Meta không cung cấp nguyên nhân cụ thể cho subcode này, app giữ token ở trạng thái hiện tại và không tự retry.`
-            : `${classified.reason} Không tự gửi lại yêu cầu. Nếu đây là lỗi timeout/kết nối, hãy kiểm tra Meta Business Settings trước khi thử lại để tránh tạo trùng.`,
+            ? `${classified.reason} App đã xác nhận /me và /me/accounts trước khi POST /{user-id}/businesses.`
+            : `${classified.reason} Không tự gửi lại yêu cầu.`,
           tokenStatus: updated.status,
           token: publicToken(updated),
-          page: { id: stringValue(pageProbe.id), name: stringValue(pageProbe.name) },
           metaError: { code: classified.code, subcode: classified.subcode },
         },
-        { status: 400 },
+        { status: classified.code === 502 ? 502 : 400 },
       );
     }
-
-    const businessId = stringValue(createResult.id);
-    if (!/^\d{5,30}$/.test(businessId)) {
-      await updateMetaToken(workspaceOwner, currentRecord, {
-        lastUsedAt: now,
-        lastCreateAt: now,
-        lastCreateResult: 'needs_review',
-        lastError: 'Meta phản hồi nhưng không trả Business ID.',
-      });
-      throw new Error('Meta đã phản hồi nhưng không trả Business ID. Cần kiểm tra Meta Business Settings trước khi thử lại.');
-    }
-
-    let business: MetaObject = {};
-    let healthNote = 'Business Manager vừa được tạo qua Meta Graph API.';
-    try {
-      business = await graphWithToken(token, businessId, {
-        fields: 'id,name,verification_status,creation_time,primary_page,timezone_id,created_by,updated_time',
-      });
-    } catch (error) {
-      healthNote = `Đã nhận Business ID từ Meta nhưng bước đọc lại thông tin thất bại: ${(error as Error).message}`;
-    }
-
-    const confirmedName = stringValue(business.name) || input.name;
-    const verificationStatus = stringValue(business.verification_status) || 'unknown';
-    const verified = verificationStatus.toLowerCase() === 'verified';
-    const primaryPage = objectValue(business.primary_page);
-    const createdBy = objectValue(business.created_by);
-    const primaryPageId = stringValue(primaryPage.id) || input.primaryPage;
-    const primaryPageName = stringValue(primaryPage.name) || stringValue(pageProbe.name);
-    const creationTime = stringValue(business.creation_time) || now;
-    const timezoneId = stringValue(business.timezone_id) || String(input.timezone);
 
     const invite: InviteResult = adminEmail
       ? { requested: true, email: adminEmail, status: 'pending' }
       : { requested: false, status: 'not_requested' };
 
+    let healthNote = 'Tạo BM token-only: POST /{user-id}/businesses với access_token form field.';
     if (adminEmail) {
       try {
-        await graphPostWithToken(token, `${businessId}/business_users`, {
+        await graphPostWithToken(source.token, `${created.id}/business_users`, {
           email: adminEmail,
           role: 'ADMIN',
         });
-        healthNote += ` Đã gửi lời mời ADMIN tới ${adminEmail}; người nhận cần chấp nhận lời mời của Meta.`;
+        healthNote += ` Đã gửi lời mời ADMIN tới ${adminEmail}.`;
       } catch (error) {
         const classified = classifyMetaTokenError(error);
         invite.status = 'failed';
         invite.error = classified.reason;
-        healthNote += ` Tạo BM thành công nhưng gửi lời mời ADMIN thất bại: ${classified.reason}`;
+        healthNote += ` Tạo BM thành công nhưng mời ADMIN thất bại: ${classified.reason}`;
         if (classified.status === 'invalid' || classified.status === 'permission_issue' || classified.status === 'rate_limited') {
           currentRecord = await updateMetaToken(workspaceOwner, currentRecord, {
             status: classified.status,
@@ -281,14 +173,14 @@ export async function POST(req: Request) {
 
     currentRecord = await updateMetaToken(workspaceOwner, currentRecord, {
       status: finalTokenStatus,
-      metaUserId,
-      metaUserName: stringValue(me.name) || currentRecord.metaUserName || '',
+      metaUserId: created.inspection.me.id,
+      metaUserName: created.inspection.me.name,
       lastCheckedAt: now,
       lastUsedAt: now,
       lastCreateAt: now,
       lastCreateResult: invite.status === 'failed'
-        ? `success:${businessId}:admin_invite_failed`
-        : `success:${businessId}`,
+        ? `success:${created.id}:admin_invite_failed`
+        : `success:${created.id}`,
       ...(invite.status === 'failed'
         ? {}
         : { lastError: undefined, lastErrorCode: undefined, lastErrorSubcode: undefined }),
@@ -298,33 +190,34 @@ export async function POST(req: Request) {
     try {
       await db().batch([
         put(workspaceOwner, 'asset', {
-          id: `${workspaceOwner}:meta:${businessId}`,
-          metaId: businessId,
-          name: confirmedName,
+          id: `${workspaceOwner}:meta:${created.id}`,
+          metaId: created.id,
+          name: created.name,
           type: 'BM',
           status: 'Truy cập được',
-          verified,
-          verificationStatus,
+          verified: created.verified,
+          verificationStatus: created.verificationStatus,
           country: 'Chưa rõ',
           tier: 'Chưa rõ',
           limit: 'Chưa rõ',
           parent: '',
           source: 'meta',
           checked: now,
-          creationTime,
-          timezoneId,
-          primaryPageId,
-          primaryPageName,
-          createdById: stringValue(createdBy.id) || metaUserId,
-          createdByName: stringValue(createdBy.name) || stringValue(me.name),
+          creationTime: created.createdTime,
+          timezoneId: created.timezoneId,
+          primaryPageId: created.primaryPage.id,
+          primaryPageName: created.primaryPage.name,
+          createdById: created.createdBy.id,
+          createdByName: created.createdBy.name,
           adminEmail: adminEmail || '',
           adminInviteStatus: invite.status,
           adminInviteError: invite.error || '',
+          sourceTokenId: currentRecord.id,
           healthNote,
         }),
         audit(
           workspaceOwner,
-          `Tạo Business Manager thật: ${confirmedName} · token ${currentRecord.label}${adminEmail ? ` · admin ${adminEmail}` : ''}`,
+          `Tạo Business Manager thật: ${created.name} · token ${currentRecord.label}${adminEmail ? ` · admin ${adminEmail}` : ''}`,
         ),
       ]);
     } catch {
@@ -332,28 +225,25 @@ export async function POST(req: Request) {
     }
 
     return Response.json({
-      id: businessId,
-      name: confirmedName,
+      id: created.id,
+      name: created.name,
       saved,
       tokenStatus: currentRecord.status,
       business: {
-        id: businessId,
-        name: confirmedName,
+        id: created.id,
+        name: created.name,
         status: 'Truy cập được',
-        verificationStatus,
-        verified,
-        creationTime,
-        timezoneId,
-        primaryPage: { id: primaryPageId, name: primaryPageName },
-        createdBy: {
-          id: stringValue(createdBy.id) || metaUserId,
-          name: stringValue(createdBy.name) || stringValue(me.name),
-        },
+        verificationStatus: created.verificationStatus,
+        verified: created.verified,
+        creationTime: created.createdTime,
+        timezoneId: created.timezoneId,
+        primaryPage: created.primaryPage,
+        createdBy: created.createdBy,
       },
       invite,
       message: saved
-        ? `Đã tạo Business Manager ${confirmedName} trên Meta bằng token ${currentRecord.label}.`
-        : `Business Manager đã được tạo trên Meta (ID ${businessId}) nhưng chưa lưu được vào workspace. Bấm Đồng bộ Meta để nạp lại.`,
+        ? `Đã tạo Business Manager ${created.name} trên Meta bằng token ${currentRecord.label}.`
+        : `Business Manager đã được tạo trên Meta (ID ${created.id}) nhưng chưa lưu được vào workspace. Bấm Đồng bộ Meta để nạp lại.`,
     });
   } catch (error) {
     if (error instanceof z.ZodError) {

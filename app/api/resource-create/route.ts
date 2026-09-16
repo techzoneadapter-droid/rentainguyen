@@ -4,7 +4,8 @@ import { audit, db, list, owner, put } from '../../../lib/server';
 import {
   classifyMetaTokenError,
   getMetaTokenSecret,
-  graphWithToken,
+  graphListWithToken,
+  inspectUserToken,
   updateMetaToken,
 } from '../../../lib/meta-tokens';
 
@@ -14,10 +15,6 @@ const requestSchema = z.object({
 });
 
 type MetaObject = Record<string, unknown>;
-type GraphListResponse = MetaObject & {
-  data?: unknown[];
-  paging?: { cursors?: { after?: string } };
-};
 
 function sameOrigin(req: Request) {
   const origin = req.headers.get('origin');
@@ -32,27 +29,9 @@ function objectValue(value: unknown): MetaObject {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as MetaObject : {};
 }
 
-async function graphListWithToken(token: string, path: string, fields: string) {
-  const rows: MetaObject[] = [];
-  let after = '';
-  for (let page = 0; page < 20; page += 1) {
-    const response = await graphWithToken(token, path, {
-      fields,
-      limit: '100',
-      ...(after ? { after } : {}),
-    }) as GraphListResponse;
-    const pageRows = Array.isArray(response.data) ? response.data.map(objectValue) : [];
-    rows.push(...pageRows);
-    const nextAfter = text(response.paging?.cursors?.after);
-    if (!nextAfter || pageRows.length === 0) break;
-    after = nextAfter;
-  }
-  return rows;
-}
-
 async function safeList(token: string, path: string, fields: string, warnings: string[]) {
   try {
-    return await graphListWithToken(token, path, fields);
+    return await graphListWithToken(token, path, fields, 20);
   } catch (error) {
     const classified = classifyMetaTokenError(error);
     warnings.push(`${path}: ${classified.reason}`);
@@ -83,9 +62,10 @@ export async function POST(req: Request) {
     const now = new Date().toISOString();
     const warnings: string[] = [];
 
-    let me: MetaObject;
+    let inspection;
     try {
-      me = await graphWithToken(source.token, 'me', { fields: 'id,name' });
+      inspection = await inspectUserToken(source.token);
+      warnings.push(...inspection.warnings);
     } catch (error) {
       const classified = classifyMetaTokenError(error);
       await updateMetaToken(workspaceOwner, source.record, {
@@ -99,14 +79,13 @@ export async function POST(req: Request) {
       return Response.json({ error: classified.reason }, { status: 400 });
     }
 
-    const [businesses, directAccounts, directPages] = await Promise.all([
+    const [businesses, directAccounts] = await Promise.all([
       safeList(source.token, 'me/businesses', 'id,name,verification_status,timezone_id,primary_page,created_time', warnings),
       safeList(source.token, 'me/adaccounts', 'id,name,account_status,spend_cap,currency,disable_reason', warnings),
-      safeList(source.token, 'me/accounts', 'id,name,tasks', warnings),
     ]);
 
-    const metaUserId = text(me.id);
-    const metaUserName = text(me.name);
+    const metaUserId = inspection.me.id;
+    const metaUserName = inspection.me.name;
     const existing = await list(workspaceOwner, 'asset') as Asset[];
     const existingById = new Map(existing.map((asset) => [asset.id, asset] as const));
     const importedById = new Map<string, Asset>();
@@ -124,7 +103,7 @@ export async function POST(req: Request) {
         sourceTokenId: source.record.id,
         createdById: metaUserId || current?.createdById,
         createdByName: metaUserName || current?.createdByName,
-        healthNote: `Đồng bộ từ token ${source.record.label}.`,
+        healthNote: `Đồng bộ từ token ${source.record.label} (GET /me + edges).`,
       };
     }
 
@@ -175,7 +154,7 @@ export async function POST(req: Request) {
     }
 
     directAccounts.forEach((account) => addAccount(account));
-    directPages.forEach((page) => addSimple(page, 'Page'));
+    inspection.pages.forEach((page) => addSimple(page as unknown as MetaObject, 'Page'));
 
     for (const business of businesses) {
       const businessId = text(business.id);

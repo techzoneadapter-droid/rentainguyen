@@ -1,12 +1,14 @@
 import { z } from 'zod';
 import type { Asset } from '../../../lib/data';
-import { audit, config, db, list, owner, put } from '../../../lib/server';
+import { audit, db, list, owner, put } from '../../../lib/server';
 import {
   classifyMetaTokenError,
+  cleanMetaToken,
   encryptToken,
   getMetaTokenSecret,
   getMetaTokens,
-  graphWithToken,
+  graphListWithToken,
+  inspectUserToken,
   MetaTokenError,
   publicToken,
   tokenFingerprint,
@@ -15,10 +17,6 @@ import {
 } from '../../../lib/meta-tokens';
 
 type MetaObject = Record<string, unknown>;
-type GraphListResponse = MetaObject & {
-  data?: unknown[];
-  paging?: { cursors?: { after?: string } };
-};
 
 type TokenInventory = {
   id: string;
@@ -78,109 +76,12 @@ function text(value: unknown) {
   return value === undefined || value === null ? '' : String(value).trim();
 }
 
-function objectValue(value: unknown): MetaObject {
-  return value && typeof value === 'object' && !Array.isArray(value) ? value as MetaObject : {};
-}
-
 function inventoryId(workspaceOwner: string, tokenId: string) {
   return `${workspaceOwner}:token-inventory:${tokenId}`;
 }
 
-function cleanToken(value: string) {
-  return String(value || '')
-    .replace(/^\s*Bearer\s+/i, '')
-    .replace(/[\u200B-\u200D\uFEFF]/g, '')
-    .replace(/^['"]|['"]$/g, '')
-    .replace(/\s+/g, '')
-    .trim();
-}
-
 function deleteRecord(workspaceOwner: string, kind: string, id: string) {
   return db().prepare('DELETE FROM records WHERE owner = ? AND kind = ? AND id = ?').bind(workspaceOwner, kind, id);
-}
-
-async function wait(ms: number) {
-  await new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function makeLooseMetaError(response: Response, body: MetaObject) {
-  const error = objectValue(body.error);
-  const code = Number(error.code || response.status || 0);
-  const subcode = Number(error.error_subcode || 0) || undefined;
-  const message = [text(error.error_user_title), text(error.error_user_msg), text(error.message)]
-    .filter(Boolean)
-    .filter((value, index, array) => array.indexOf(value) === index)
-    .join(' — ') || 'Meta không trả về dữ liệu hợp lệ.';
-  const suffix = subcode ? `/${subcode}` : '';
-  return new MetaTokenError(`Meta ${code}${suffix}: ${message}`, { code, subcode, httpStatus: response.status });
-}
-
-async function graphWithTokenAsQueryParam(token: string, path: string, params: Record<string, string> = {}) {
-  const url = new URL(`https://graph.facebook.com/${config().version}/${path}`);
-  for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
-  url.searchParams.set('access_token', token);
-  const response = await fetch(url, { signal: AbortSignal.timeout(25000) });
-  const body = await response.json().catch(() => ({})) as MetaObject;
-  if (!response.ok || body.error) throw makeLooseMetaError(response, body);
-  return body;
-}
-
-async function probeDebugToken(token: string) {
-  const debug = await graphWithTokenAsQueryParam(token, 'debug_token', { input_token: token }) as MetaObject;
-  const data = objectValue(debug.data);
-  if (data.is_valid === true) {
-    const userId = text(data.user_id);
-    const appId = text(data.app_id);
-    return {
-      id: userId || appId || 'debug-token-valid',
-      name: userId ? `Meta User ${userId}` : `Meta App ${appId || 'token'}`,
-      debugOnly: true,
-    } as MetaObject;
-  }
-  throw new MetaTokenError('Meta debug_token trả về is_valid=false.', { code: 190, httpStatus: 400 });
-}
-
-async function probeMe(token: string) {
-  const cleaned = cleanToken(token);
-  let lastError: unknown;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      return await graphWithToken(cleaned, 'me', { fields: 'id,name' }) as MetaObject;
-    } catch (error) {
-      lastError = error;
-      try {
-        return await graphWithTokenAsQueryParam(cleaned, 'me', { fields: 'id,name' });
-      } catch (fallbackError) {
-        lastError = fallbackError;
-      }
-      const classified = classifyMetaTokenError(lastError);
-      if (classified.status !== 'unknown_error' && classified.status !== 'rate_limited' && classified.status !== 'permission_issue') throw lastError;
-      if (attempt === 0) await wait(350);
-    }
-  }
-  try {
-    return await probeDebugToken(cleaned);
-  } catch {
-    throw lastError;
-  }
-}
-
-async function graphListWithToken(token: string, path: string, fields: string) {
-  const rows: MetaObject[] = [];
-  let after = '';
-  for (let page = 0; page < 12; page += 1) {
-    const response = await graphWithToken(cleanToken(token), path, {
-      fields,
-      limit: '100',
-      ...(after ? { after } : {}),
-    }) as GraphListResponse;
-    const pageRows = Array.isArray(response.data) ? response.data.map(objectValue) : [];
-    rows.push(...pageRows);
-    const next = text(response.paging?.cursors?.after);
-    if (!next || pageRows.length === 0) break;
-    after = next;
-  }
-  return rows;
 }
 
 async function safeList(token: string, path: string, fields: string, warnings: string[]) {
@@ -189,21 +90,6 @@ async function safeList(token: string, path: string, fields: string, warnings: s
   } catch (error) {
     const classified = classifyMetaTokenError(error);
     warnings.push(`${path}: ${classified.reason}`);
-    return [];
-  }
-}
-
-async function readPermissions(token: string, warnings: string[]) {
-  try {
-    const rows = await graphListWithToken(token, 'me/permissions', 'permission,status');
-    return rows
-      .filter((row) => text(row.status).toLowerCase() === 'granted')
-      .map((row) => text(row.permission))
-      .filter(Boolean)
-      .sort();
-  } catch (error) {
-    const classified = classifyMetaTokenError(error);
-    warnings.push(`permissions: ${classified.reason}`);
     return [];
   }
 }
@@ -225,23 +111,26 @@ function uniqueIds(rows: MetaObject[], normalize = (value: string) => value) {
 
 async function scanToken(workspaceOwner: string, record: MetaTokenRecord, rawToken: string) {
   const now = new Date().toISOString();
-  const token = cleanToken(rawToken);
+  const token = cleanMetaToken(rawToken);
   const warnings: string[] = [];
   if (!token || token.length < 20) {
     throw new MetaTokenError('Token trống hoặc quá ngắn sau khi làm sạch ký tự xuống dòng/khoảng trắng.', { code: 400, httpStatus: 400 });
   }
   try {
-    const me = await probeMe(token);
-    if (me.debugOnly) warnings.push('Token chỉ xác minh được bằng debug_token; /me không đọc được trong app/API context hiện tại. Một số thao tác tài nguyên có thể không chạy cho đến khi dùng Graph API user token phù hợp.');
+    const inspection = await inspectUserToken(token);
+    warnings.push(...inspection.warnings);
+    if (inspection.debug) {
+      if (inspection.debug.appId) warnings.push(`debug_token.app_id=${inspection.debug.appId}`);
+      if (inspection.debug.type) warnings.push(`debug_token.type=${inspection.debug.type}`);
+    }
 
-    const [permissions, businesses, directPages, directAds] = me.debugOnly ? [[], [], [], []] : await Promise.all([
-      readPermissions(token, warnings),
+    const [businesses, directAds] = await Promise.all([
       safeList(token, 'me/businesses', 'id,name,verification_status', warnings),
-      safeList(token, 'me/accounts', 'id,name,tasks', warnings),
       safeList(token, 'me/adaccounts', 'id,name,account_status,disable_reason', warnings),
     ]);
 
-    const pageMap = uniqueIds(directPages);
+    const pageMap = uniqueIds(inspection.pages as unknown as MetaObject[]);
+    for (const page of inspection.pages) pageMap.set(page.id, page as unknown as MetaObject);
     const adMap = uniqueIds(directAds, (id) => id.replace(/^act_/, ''));
     const pixelMap = new Map<string, MetaObject>();
 
@@ -268,9 +157,9 @@ async function scanToken(workspaceOwner: string, record: MetaTokenRecord, rawTok
       id: inventoryId(workspaceOwner, record.id),
       tokenId: record.id,
       status: 'active',
-      metaUserId: text(me.id),
-      metaUserName: text(me.name),
-      permissions,
+      metaUserId: inspection.me.id,
+      metaUserName: inspection.me.name,
+      permissions: inspection.permissions,
       businessCount: businesses.length,
       verifiedBusinessCount: businesses.filter((business) => text(business.verification_status).toLowerCase() === 'verified').length,
       pageCount: pageMap.size,
@@ -280,7 +169,7 @@ async function scanToken(workspaceOwner: string, record: MetaTokenRecord, rawTok
       restrictedAdCount,
       pixelCount: pixelMap.size,
       totalResources: businesses.length + pageMap.size + adMap.size + pixelMap.size,
-      warnings: warnings.slice(0, 20),
+      warnings: warnings.filter((item, index, array) => array.indexOf(item) === index).slice(0, 20),
       scannedAt: now,
       created: now,
     };
@@ -400,7 +289,7 @@ export async function POST(req: Request) {
       let reused = 0;
 
       for (const item of input.items) {
-        const token = cleanToken(item.token);
+        const token = cleanMetaToken(item.token);
         const fingerprint = await tokenFingerprint(token);
         let record = byFingerprint.get(fingerprint);
         if (!record) {

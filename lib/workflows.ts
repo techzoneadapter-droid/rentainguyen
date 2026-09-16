@@ -272,13 +272,16 @@ export async function tick(user: string) {
     const connection = config();
     if (!connection.token) throw new Error('Kết nối Meta bị thiếu.');
 
-    const response = await fetch(`https://graph.facebook.com/${connection.version}/${path}`, {
+    const url = new URL(`https://graph.facebook.com/${connection.version}/${path}`);
+    const body = new URLSearchParams(step.params);
+    body.set('access_token', connection.token);
+    if (step.method === 'DELETE') url.searchParams.set('access_token', connection.token);
+    const response = await fetch(url.toString(), {
       method: step.method,
-      headers: {
-        Authorization: `Bearer ${connection.token}`,
+      headers: step.method === 'DELETE' ? undefined : {
         'Content-Type': 'application/x-www-form-urlencoded',
       },
-      body: new URLSearchParams(step.params),
+      body: step.method === 'DELETE' ? undefined : body,
       signal: AbortSignal.timeout(25000),
     });
 
