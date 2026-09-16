@@ -20,11 +20,8 @@ const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 
 const SESSION_URLS = [
   'https://www.facebook.com/',
-  'https://www.facebook.com/me',
-  'https://business.facebook.com/',
-  'https://business.facebook.com/latest/home',
+  'https://business.facebook.com/settings',
   'https://adsmanager.facebook.com/adsmanager/manage/accounts',
-  'https://www.facebook.com/pages/?category=your_pages',
 ];
 
 function decodeHtml(value: string) {
@@ -54,7 +51,7 @@ async function facebookFetch(cookie: string, url: string, init: RequestInit = {}
     ...init,
     headers,
     redirect: 'follow',
-    signal: AbortSignal.timeout(20000),
+    signal: AbortSignal.timeout(8000),
   });
   const text = await response.text();
   return { response, text, url: response.url };
@@ -103,24 +100,42 @@ function extractPairs(html: string, idPattern: RegExp, namePattern?: RegExp) {
   return uniqueNamed(ids.map((id, index) => ({ id, name: names[index] || `ID ${id}` })));
 }
 
-function extractResources(html: string) {
+function extractTyped(html: string, keywords: string[], excludeIds: string[] = []) {
+  const skip = new Set(excludeIds);
+  const rows: Array<{ id: string; name: string }> = [];
+  const push = (id: string, name: string, index: number) => {
+    if (!/^\d{5,30}$/.test(id) || skip.has(id)) return;
+    const context = html.slice(Math.max(0, index - 90), index + 140).toLowerCase();
+    if (!keywords.some((keyword) => context.includes(keyword))) return;
+    rows.push({ id, name: decodeHtml(name) });
+  };
+  for (const match of html.matchAll(/"id"\s*:\s*"(\d{5,30})"\s*,\s*"name"\s*:\s*"([^"]{1,160})"/g)) {
+    push(match[1], match[2], match.index || 0);
+  }
+  for (const match of html.matchAll(/"name"\s*:\s*"([^"]{1,160})"\s*,\s*"id"\s*:\s*"(\d{5,30})"/g)) {
+    push(match[2], match[1], match.index || 0);
+  }
+  return uniqueNamed(rows);
+}
+
+function extractResources(html: string, uid = '') {
   const businesses = uniqueNamed([
+    ...extractTyped(html, ['business', 'bizkit', 'business_id', 'businessid'], [uid]),
     ...extractPairs(html, /"business(?:_i|I)d"\s*:\s*"(\d{5,30})"/g, /"business(?:Name|_name)"\s*:\s*"([^"]+)"/g),
-    ...extractPairs(html, /"business"\s*:\s*\{[^{}]{0,80}"id"\s*:\s*"(\d{5,30})"/g),
-    ...[...html.matchAll(/business\.facebook\.com\/(?:settings|latest)?[^"'\s]*[?&]business_id=(\d{5,30})/g)].map((match) => ({ id: match[1], name: `BM ${match[1]}` })),
+    ...[...html.matchAll(/[?&]business_id=(\d{5,30})/g)].map((match) => ({ id: match[1], name: `BM ${match[1]}` })),
     ...[...html.matchAll(/\/business\/(\d{5,30})\//g)].map((match) => ({ id: match[1], name: `BM ${match[1]}` })),
-  ]);
+  ]).filter((row) => row.id !== uid);
 
   const adAccounts = uniqueNamed([
+    ...extractTyped(html, ['adaccount', 'ad_account', 'act_', 'account_id', 'adaccountid'], [uid]),
     ...extractPairs(html, /"account_id"\s*:\s*"(\d{5,30})"/g, /"account_name"\s*:\s*"([^"]+)"/g),
-    ...extractPairs(html, /"adAccountId"\s*:\s*"(\d{5,30})"/g),
     ...[...html.matchAll(/(?:act_|act=)(\d{5,30})/g)].map((match) => ({ id: match[1], name: `Ad account ${match[1]}` })),
-  ]).map((row) => ({ ...row, accountStatus: 1 }));
+  ]).filter((row) => row.id !== uid).map((row) => ({ ...row, accountStatus: 1 }));
 
   const pages = uniqueNamed([
+    ...extractTyped(html, ['page_id', 'pageid', 'managed_page', 'your_pages'], [uid]),
     ...extractPairs(html, /"page(?:_i|I)d"\s*:\s*"(\d{5,30})"/g, /"page(?:Name|_name)"\s*:\s*"([^"]+)"/g),
-    ...extractPairs(html, /"profile_id"\s*:\s*"(\d{5,30})"/g),
-  ]).map((row) => ({ ...row, tasks: [] as string[] }));
+  ]).filter((row) => row.id !== uid).map((row) => ({ ...row, tasks: [] as string[] }));
 
   return { businesses, adAccounts, pages };
 }
@@ -160,7 +175,6 @@ export async function inspectCookieSession(rawCookie: string): Promise<CookieIns
   }
 
   const warnings: string[] = [];
-  const pagesHtml: string[] = [];
   let alive = false;
   let dtsg = '';
   let name = '';
@@ -182,7 +196,6 @@ export async function inspectCookieSession(rawCookie: string): Promise<CookieIns
       continue;
     }
     alive = true;
-    pagesHtml.push(text);
     const profile = extractProfile(text, uid);
     if (profile.uid) uid = profile.uid;
     if (profile.name && profile.name !== `Meta User ${profile.uid}`) name = profile.name;
@@ -190,7 +203,7 @@ export async function inspectCookieSession(rawCookie: string): Promise<CookieIns
     for (const token of extractTokens(text)) {
       if (!tokens.includes(token)) tokens.push(token);
     }
-    const extracted = extractResources(text);
+    const extracted = extractResources(text, uid);
     businesses = uniqueNamed([...businesses, ...extracted.businesses]);
     adAccounts = uniqueNamed([...adAccounts, ...extracted.adAccounts]).map((row) => ({ ...row, accountStatus: 1 }));
     pages = uniqueNamed([...pages, ...extracted.pages]).map((row) => ({ ...row, tasks: [] as string[] }));
@@ -200,7 +213,7 @@ export async function inspectCookieSession(rawCookie: string): Promise<CookieIns
     throw new Error('Cookie Facebook không còn phiên sống. Facebook trả về trang đăng nhập/checkpoint.');
   }
 
-  if (dtsg) {
+  if (dtsg && businesses.length === 0) {
     try {
       const extra = await graphqlViewer(cookie, uid, dtsg);
       businesses = uniqueNamed([...businesses, ...extra.businesses]);

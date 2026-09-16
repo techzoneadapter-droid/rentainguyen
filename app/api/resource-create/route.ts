@@ -1,11 +1,12 @@
 import { z } from 'zod';
 import type { Asset } from '../../../lib/data';
 import { audit, db, list, owner, put } from '../../../lib/server';
+import { inspectAccount } from '../../../lib/account-inspect';
+import { getSessionCookieByUid, uidFromLabel } from '../../../lib/credential-vault';
 import {
   classifyMetaTokenError,
   getMetaTokenSecret,
   graphListWithToken,
-  inspectUserToken,
   updateMetaToken,
 } from '../../../lib/meta-tokens';
 
@@ -61,28 +62,26 @@ export async function POST(req: Request) {
     const source = await getMetaTokenSecret(workspaceOwner, input.tokenId);
     const now = new Date().toISOString();
     const warnings: string[] = [];
+    const uidHint = source.record.metaUserId || uidFromLabel(source.record.label);
+    let cookie = '';
+    try { cookie = await getSessionCookieByUid(workspaceOwner, uidHint); } catch { cookie = ''; }
 
-    let inspection;
-    try {
-      inspection = await inspectUserToken(source.token);
-      warnings.push(...inspection.warnings);
-    } catch (error) {
-      const classified = classifyMetaTokenError(error);
-      await updateMetaToken(workspaceOwner, source.record, {
-        status: classified.status,
-        lastCheckedAt: now,
-        lastUsedAt: now,
-        lastError: classified.reason,
-        lastErrorCode: classified.code,
-        lastErrorSubcode: classified.subcode,
-      });
-      return Response.json({ error: classified.reason }, { status: 400 });
-    }
+    const inspection = await inspectAccount({ token: source.token, cookie: cookie || undefined });
+    warnings.push(...inspection.warnings);
+    const graphOk = inspection.source !== 'cookie';
 
-    const [businesses, directAccounts] = await Promise.all([
-      safeList(source.token, `${inspection.me.id}/businesses`, 'id,name,verification_status,timezone_id,primary_page,created_time', warnings),
-      safeList(source.token, `${inspection.me.id}/adaccounts`, 'id,name,account_status,spend_cap,currency,disable_reason', warnings),
-    ]);
+    const [listedBusinesses, listedAccounts] = graphOk
+      ? await Promise.all([
+        safeList(source.token, `${inspection.me.id}/businesses`, 'id,name,verification_status,timezone_id,primary_page,created_time', warnings),
+        safeList(source.token, `${inspection.me.id}/adaccounts`, 'id,name,account_status,spend_cap,currency,disable_reason', warnings),
+      ])
+      : [[], []] as const;
+    const businesses = listedBusinesses.length
+      ? listedBusinesses
+      : inspection.businesses.map((item) => ({ id: item.id, name: item.name, verification_status: item.verificationStatus || 'unknown' }));
+    const directAccounts = listedAccounts.length
+      ? listedAccounts
+      : inspection.adAccounts.map((item) => ({ id: item.id, name: item.name, account_status: item.accountStatus || 1 }));
 
     const metaUserId = inspection.me.id;
     const metaUserName = inspection.me.name;
@@ -103,7 +102,7 @@ export async function POST(req: Request) {
         sourceTokenId: source.record.id,
         createdById: metaUserId || current?.createdById,
         createdByName: metaUserName || current?.createdByName,
-        healthNote: `Đồng bộ từ token ${source.record.label} (GET /me + edges).`,
+        healthNote: `Đồng bộ từ ${source.record.label} (${inspection.source === 'cookie' ? 'cookie session' : 'Graph token'}).`,
       };
     }
 
@@ -184,13 +183,16 @@ export async function POST(req: Request) {
         ...common(currentBusiness),
       });
 
-      const [ownedAccounts, clientAccounts, ownedPages, clientPages, pixels] = await Promise.all([
-        safeList(source.token, `${businessId}/owned_ad_accounts`, 'id,name,account_status,spend_cap,currency,disable_reason', warnings),
-        safeList(source.token, `${businessId}/client_ad_accounts`, 'id,name,account_status,spend_cap,currency,disable_reason', warnings),
-        safeList(source.token, `${businessId}/owned_pages`, 'id,name', warnings),
-        safeList(source.token, `${businessId}/client_pages`, 'id,name', warnings),
-        safeList(source.token, `${businessId}/adspixels`, 'id,name', warnings),
-      ]);
+      const nested = graphOk
+        ? await Promise.all([
+          safeList(source.token, `${businessId}/owned_ad_accounts`, 'id,name,account_status,spend_cap,currency,disable_reason', warnings),
+          safeList(source.token, `${businessId}/client_ad_accounts`, 'id,name,account_status,spend_cap,currency,disable_reason', warnings),
+          safeList(source.token, `${businessId}/owned_pages`, 'id,name', warnings),
+          safeList(source.token, `${businessId}/client_pages`, 'id,name', warnings),
+          safeList(source.token, `${businessId}/adspixels`, 'id,name', warnings),
+        ])
+        : [[], [], [], [], []] as const;
+      const [ownedAccounts, clientAccounts, ownedPages, clientPages, pixels] = nested;
 
       [...ownedAccounts, ...clientAccounts].forEach((account) => addAccount(account, businessRecordId));
       [...ownedPages, ...clientPages].forEach((page) => addSimple(page, 'Page', businessRecordId));
@@ -209,7 +211,7 @@ export async function POST(req: Request) {
       metaUserName: metaUserName || source.record.metaUserName,
       lastCheckedAt: now,
       lastUsedAt: now,
-      lastError: warnings.length ? warnings.slice(0, 4).join(' | ') : undefined,
+      lastError: undefined,
       lastErrorCode: undefined,
       lastErrorSubcode: undefined,
     });

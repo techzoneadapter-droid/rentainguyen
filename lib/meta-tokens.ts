@@ -235,11 +235,34 @@ function metaAppAccessToken() {
   return '';
 }
 
+const graphAppLoadUntil = new Map<string, { until: number; error: MetaTokenError }>();
+
 export function isAppLoadError(error: unknown) {
   const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
   const code = error instanceof MetaTokenError ? error.code : undefined;
   return /error loading application|cannot load application|error validating application|application has been deleted/.test(message)
     || ((code === 1 || code === 100 || code === 190) && /application/.test(message));
+}
+
+function graphTokenKey(token: string) {
+  return `${token.slice(0, 18)}:${token.length}:${token.slice(-10)}`;
+}
+
+export function isGraphTokenBlocked(token: string) {
+  const hit = graphAppLoadUntil.get(graphTokenKey(token));
+  return Boolean(hit && hit.until > Date.now());
+}
+
+function rememberAppLoad(token: string, error: unknown) {
+  if (!isAppLoadError(error)) return;
+  const meta = error instanceof MetaTokenError
+    ? error
+    : new MetaTokenError(error instanceof Error ? error.message : 'Error loading application', { code: 190, httpStatus: 400 });
+  graphAppLoadUntil.set(graphTokenKey(token), { until: Date.now() + 120000, error: meta });
+}
+
+function blockedGraphError(token: string) {
+  return graphAppLoadUntil.get(graphTokenKey(token))?.error;
 }
 
 export function graphEdge(userId: string, edge: string) {
@@ -310,19 +333,17 @@ async function metaRequest(
     throw new MetaTokenError('Token trống hoặc quá ngắn sau khi làm sạch.', { code: 400, httpStatus: 400 });
   }
 
+  const blocked = blockedGraphError(token);
+  if (blocked) throw blocked;
+
   const version = config().version;
   const attempts: GraphCallStyle[] = method === 'GET'
     ? [
         { version, mode: 'get-query', ua: UA_WEB },
         { version: '', mode: 'get-query', ua: UA_FB },
-        { version: 'v18.0', mode: 'get-query', ua: UA_FB },
-        { version, mode: 'post-get', ua: UA_FB },
-        { version, mode: 'oauth-header', ua: UA_FB },
       ]
     : [
         { version, mode: 'form-post', ua: UA_WEB },
-        { version: '', mode: 'form-post', ua: UA_FB },
-        { version: 'v18.0', mode: 'form-post', ua: UA_FB },
       ];
 
   let lastError: unknown;
@@ -331,6 +352,7 @@ async function metaRequest(
       return await metaRequestOnce(token, path, method, params, attempts[index]);
     } catch (error) {
       lastError = error;
+      rememberAppLoad(token, error);
       const canRetry = index < attempts.length - 1 && isAppLoadError(error);
       if (!canRetry) throw error;
     }
@@ -423,6 +445,15 @@ export async function inspectUserToken(rawToken: string): Promise<TokenInspectio
   const token = cleanMetaToken(rawToken);
   const warnings: string[] = [];
   const debug = await debugUserToken(token);
+  if (isGraphTokenBlocked(token) && debug?.isValid && debug.userId) {
+    return {
+      debug,
+      me: { id: debug.userId, name: `Meta User ${debug.userId}` },
+      permissions: uniqueScopes(debug.scopes),
+      pages: [],
+      warnings: ['Graph blocked Error loading application. Dùng debug_token (scopes + user id), không retry /me.'],
+    };
+  }
 
   let meId = '';
   let meName = '';
@@ -471,53 +502,36 @@ export async function inspectUserToken(rawToken: string): Promise<TokenInspectio
 
   const actor = meId;
 
-  let permissions: string[] = [];
-  try {
-    let rows: MetaObject[];
+  let permissions: string[] = uniqueScopes(debug?.scopes);
+  if (!permissions.length && !isGraphTokenBlocked(token)) {
     try {
-      rows = await graphListWithToken(token, graphEdge(actor, 'permissions'), 'permission,status', 5);
-    } catch {
-      try {
-        rows = await graphListWithToken(token, 'me/permissions', 'permission,status', 5);
-      } catch {
-        rows = await graphListWithToken(token, graphEdge(actor, 'permissions'), '', 5);
-      }
+      const rows = await graphListWithToken(token, graphEdge(actor, 'permissions'), 'permission,status', 2);
+      permissions = uniqueScopes(
+        rows.filter((row) => text(row.status).toLowerCase() === 'granted').map((row) => text(row.permission)),
+      );
+    } catch (error) {
+      warnings.push(`permissions: ${classifyMetaTokenError(error).reason}`);
     }
-    permissions = rows
-      .filter((row) => text(row.status).toLowerCase() === 'granted')
-      .map((row) => text(row.permission))
-      .filter(Boolean);
-  } catch (error) {
-    warnings.push(`permissions: ${classifyMetaTokenError(error).reason}`);
   }
-  permissions = uniqueScopes(permissions, debug?.scopes);
 
   let pages: ManagedPage[] = [];
-  try {
-    let rows: MetaObject[];
+  if (!isGraphTokenBlocked(token)) {
     try {
-      rows = await graphListWithToken(token, graphEdge(actor, 'accounts'), 'id,name,tasks');
-    } catch {
-      try {
-        rows = await graphListWithToken(token, graphEdge(actor, 'accounts'), 'id,name');
-        warnings.push('accounts không trả tasks; vẫn dùng id và name của Page.');
-      } catch {
-        rows = await graphListWithToken(token, 'me/accounts', 'id,name');
+      const rows = await graphListWithToken(token, graphEdge(actor, 'accounts'), 'id,name,tasks', 4);
+      const map = new Map<string, ManagedPage>();
+      for (const row of rows) {
+        const id = text(row.id);
+        if (!/^\d{5,30}$/.test(id)) continue;
+        map.set(id, {
+          id,
+          name: text(row.name) || 'Facebook Page',
+          tasks: Array.isArray(row.tasks) ? row.tasks.map(String) : [],
+        });
       }
+      pages = Array.from(map.values());
+    } catch (error) {
+      warnings.push(`accounts: ${classifyMetaTokenError(error).reason}`);
     }
-    const map = new Map<string, ManagedPage>();
-    for (const row of rows) {
-      const id = text(row.id);
-      if (!/^\d{5,30}$/.test(id)) continue;
-      map.set(id, {
-        id,
-        name: text(row.name) || 'Facebook Page',
-        tasks: Array.isArray(row.tasks) ? row.tasks.map(String) : [],
-      });
-    }
-    pages = Array.from(map.values());
-  } catch (error) {
-    warnings.push(`accounts: ${classifyMetaTokenError(error).reason}`);
   }
 
   if (sessionCompat) {
