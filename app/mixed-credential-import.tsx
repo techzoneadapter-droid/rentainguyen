@@ -223,8 +223,13 @@ function decodeFile(buffer: ArrayBuffer) {
 
 async function jsonFetch<T>(url: string, init?: RequestInit) {
   const response = await fetch(url, init);
-  const data = await response.json() as T & { error?: string };
-  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  const data = await response.json() as T & { error?: string; message?: string; errors?: unknown; failures?: unknown };
+  if (!response.ok) {
+    const error = new Error(data.error || data.message || `HTTP ${response.status}`) as Error & { status?: number; details?: unknown };
+    error.status = response.status;
+    error.details = data;
+    throw error;
+  }
   return data;
 }
 

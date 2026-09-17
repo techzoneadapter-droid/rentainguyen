@@ -1,5 +1,6 @@
 import { TOKEN_FULL_SCOPES, uniqueScopes } from './meta-scopes';
 import { inspectCookieSession } from './meta-session';
+import { resolveAccountAvailability } from './resource-model';
 import {
   debugUserToken,
   inspectUserToken,
@@ -15,18 +16,31 @@ export type AccountInspection = TokenInspection & {
   adAccounts: Array<{ id: string; name: string; accountStatus?: number }>;
   workingToken?: string;
   cookieAlive?: boolean;
+  confirmedPermissions: string[];
+  inferredPermissions: string[];
 };
 
-function asPages(rows: Array<{ id: string; name: string; tasks?: string[] }>): ManagedPage[] {
-  return rows.map((row) => ({ id: row.id, name: row.name, tasks: row.tasks || [] }));
+function asPages(
+  rows: Array<{ id: string; name: string; tasks?: string[] }>,
+  source: 'graph_accounts' | 'session',
+): ManagedPage[] {
+  return rows.map((row) => ({ id: row.id, name: row.name, tasks: row.tasks || [], sources: [source] }));
 }
 
-function mergeNamed<T extends { id: string; name: string }>(current: T[], extra: T[]) {
-  const map = new Map(current.map((row) => [row.id, row]));
+function mergePages(current: ManagedPage[], extra: ManagedPage[]) {
+  const map = new Map(current.map((row) => [row.id, row] as const));
   for (const row of extra) {
     if (!row.id) continue;
     const existing = map.get(row.id);
-    if (!existing || (row.name && existing.name === existing.id)) map.set(row.id, row);
+    if (!existing) {
+      map.set(row.id, row);
+      continue;
+    }
+    map.set(row.id, {
+      ...existing,
+      ...(row.name && existing.name === existing.id ? row : {}),
+      sources: [...new Set([...(existing.sources || []), ...(row.sources || [])])],
+    });
   }
   return [...map.values()];
 }
@@ -43,7 +57,6 @@ export async function inspectAccount(input: { token?: string; cookie?: string })
         return null;
       })
     : Promise.resolve(null);
-
   const cookieTask = cookie
     ? inspectCookieSession(cookie).catch((error: unknown) => {
         warnings.push(`Cookie session: ${(error as Error).message}`);
@@ -52,28 +65,38 @@ export async function inspectAccount(input: { token?: string; cookie?: string })
     : Promise.resolve(null);
 
   const [graph, session] = await Promise.all([graphTask, cookieTask]);
+  const availability = resolveAccountAvailability(Boolean(graph), Boolean(session?.alive));
   if (session) warnings.push(...session.warnings);
 
   let workingToken = token || undefined;
-  let permissions = uniqueScopes(graph?.permissions);
-  if (session?.tokens.length && (!permissions.length || isGraphTokenBlocked(token))) {
+  let confirmedPermissions = uniqueScopes(graph?.permissions);
+  if (session?.tokens.length && (!confirmedPermissions.length || isGraphTokenBlocked(token))) {
     const probe = session.tokens.find((item) => item !== token) || session.tokens[0];
     const debug = await debugUserToken(probe);
     if (debug?.isValid) {
-      permissions = uniqueScopes(permissions, debug.scopes);
+      confirmedPermissions = uniqueScopes(confirmedPermissions, debug.scopes);
       workingToken = probe;
     }
   }
 
+  const inferredPermissions = session?.alive
+    ? uniqueScopes(TOKEN_FULL_SCOPES).filter((permission) => !confirmedPermissions.includes(permission))
+    : [];
+  const pages = mergePages(
+    asPages(graph?.pages || [], 'graph_accounts'),
+    asPages(session?.pages || [], 'session'),
+  );
+
   if (graph) {
-    let merged = uniqueScopes(permissions, graph.permissions);
-    if (!merged.length && session?.alive) merged = uniqueScopes(TOKEN_FULL_SCOPES);
+    confirmedPermissions = uniqueScopes(confirmedPermissions, graph.permissions);
     return {
       ...graph,
-      permissions: merged,
-      pages: graph.pages.length ? graph.pages : asPages(session?.pages || []),
-      warnings: [...graph.warnings, ...warnings].filter((item, index, array) => array.indexOf(item) === index).slice(0, 12),
-      source: session ? 'mixed' : 'graph',
+      permissions: confirmedPermissions,
+      confirmedPermissions,
+      inferredPermissions,
+      pages,
+      warnings: [...graph.warnings, ...warnings].filter((item, index, array) => array.indexOf(item) === index).slice(0, 20),
+      source: availability.source === 'mixed' ? 'mixed' : 'graph',
       businesses: session?.businesses || [],
       adAccounts: session?.adAccounts || [],
       workingToken,
@@ -82,19 +105,20 @@ export async function inspectAccount(input: { token?: string; cookie?: string })
   }
 
   if (session?.alive) {
-    if (!permissions.length) {
-      permissions = uniqueScopes(TOKEN_FULL_SCOPES);
-      warnings.push('Graph không đọc me/permissions. Hiển thị bộ quyền Ads/BM/Page chuẩn của session Power Editor.');
+    if (!confirmedPermissions.length) {
+      warnings.push('Graph không xác nhận được permission. Quyền từ cookie/session chỉ được đánh dấu là suy ra.');
     }
     return {
       debug: null,
       me: { id: session.uid, name: session.name },
-      permissions,
-      pages: asPages(session.pages),
+      permissions: confirmedPermissions,
+      confirmedPermissions,
+      inferredPermissions,
+      pages,
       warnings: [
         ...warnings,
-        'Graph 190 Error loading application. Check bằng cookie session; không đánh DIE/API không nhận.',
-      ].slice(0, 12),
+        'Graph không đọc được tài khoản nhưng cookie session còn sống; trạng thái tài khoản vẫn là LIVE theo session.',
+      ].slice(0, 20),
       source: 'cookie',
       businesses: session.businesses,
       adAccounts: session.adAccounts,

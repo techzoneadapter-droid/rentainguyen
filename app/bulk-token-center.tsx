@@ -24,6 +24,8 @@ type Inventory = {
   metaUserId?: string;
   metaUserName?: string;
   permissions: string[];
+  confirmedPermissions?: string[];
+  inferredPermissions?: string[];
   businessCount: number;
   verifiedBusinessCount: number;
   pageCount: number;
@@ -504,7 +506,7 @@ export default function BulkTokenCenter() {
                   <td className={styles.count}>{inv?.liveAdCount ?? '—'}</td>
                   <td className={styles.count}>{inv?.dieAdCount ?? '—'}</td>
                   <td className={styles.count}>{inv?.totalResources ?? '—'}</td>
-                  <td className={styles.scopeCell}>{(inv?.permissions || []).map((permission) => <span className={styles.scope} key={permission}>{permission}</span>)}{inv && !inv.permissions.length && <span className={styles.muted}>Không đọc được scope</span>}</td>
+                  <td className={styles.scopeCell}>{(inv?.confirmedPermissions || inv?.permissions || []).map((permission) => <span className={styles.scope} key={`confirmed-${permission}`}>✓ Graph: {permission}</span>)}{(inv?.inferredPermissions || []).map((permission) => <span className={styles.scope} key={`inferred-${permission}`}>~ Session: {permission}</span>)}{inv && !(inv.confirmedPermissions || inv.permissions).length && !inv.inferredPermissions?.length && <span className={styles.muted}>Không đọc được scope</span>}</td>
                   <td>{dateText(inv?.scannedAt)}</td>
                   <td><div className={styles.inlineButtons}><button className={styles.miniButton} type="button" onClick={() => void rescan([token.id])}>Check</button><button className={styles.miniButton} type="button" onClick={() => void loadOps(token.id)}>Tác vụ</button></div></td>
                 </tr>;

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { Asset } from '../../../lib/data';
+import { canonicalOpenUrl } from '../../../lib/resource-model';
 import { audit, db, list, owner, put } from '../../../lib/server';
 
 const pushSchema = z.object({
@@ -43,12 +44,6 @@ function cleanCountry(country: string) {
   return value;
 }
 
-function deliveryLink(type: string, id: string) {
-  if (type === 'BM') return `https://business.facebook.com/settings/?business_id=${id}`;
-  if (type === 'TKQC') return `https://adsmanager.facebook.com/adsmanager/manage/campaigns?act=${id}`;
-  return `https://www.facebook.com/${id}`;
-}
-
 function toGatewayResource(asset: Asset) {
   const id = metaId(asset);
   const type = gatewayType(asset);
@@ -61,7 +56,7 @@ function toGatewayResource(asset: Asset) {
     technical_status: technicalStatus(asset.status),
     country: cleanCountry(asset.country),
     health_score: technicalStatus(asset.status) === 'LIVE' ? 90 : 60,
-    external_profile_id: deliveryLink(type, id),
+    external_profile_id: canonicalOpenUrl(asset),
   };
 
   if (type === 'BM') {

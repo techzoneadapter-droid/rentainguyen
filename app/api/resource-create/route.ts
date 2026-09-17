@@ -1,44 +1,23 @@
 import { z } from 'zod';
 import type { Asset } from '../../../lib/data';
-import { audit, db, list, owner, put } from '../../../lib/server';
-import { applyBmProfile, readBmProfile } from '../../../lib/bm-profile';
-import { inspectAccount } from '../../../lib/account-inspect';
-import { getSessionCookieByUid, uidFromLabel } from '../../../lib/credential-vault';
 import {
-  classifyMetaTokenError,
-  getMetaTokenSecret,
-  graphListWithToken,
-  updateMetaToken,
-} from '../../../lib/meta-tokens';
+  discoverAccountSnapshot,
+  toStoredAccountSnapshot,
+  type StoredAccountSnapshot,
+} from '../../../lib/account-snapshot';
+import { canonicalOpenUrl } from '../../../lib/resource-model';
+import { audit, db, list, owner, put } from '../../../lib/server';
+import { getSessionCookieByUid, uidFromLabel } from '../../../lib/credential-vault';
+import { getMetaTokenSecret, updateMetaToken } from '../../../lib/meta-tokens';
 
 const requestSchema = z.object({
   action: z.literal('import_token'),
   tokenId: z.string().uuid(),
 });
 
-type MetaObject = Record<string, unknown>;
-
 function sameOrigin(req: Request) {
   const origin = req.headers.get('origin');
   return !origin || origin === new URL(req.url).origin;
-}
-
-function text(value: unknown) {
-  return value === undefined || value === null ? '' : String(value).trim();
-}
-
-function objectValue(value: unknown): MetaObject {
-  return value && typeof value === 'object' && !Array.isArray(value) ? value as MetaObject : {};
-}
-
-async function safeList(token: string, path: string, fields: string, warnings: string[]) {
-  try {
-    return await graphListWithToken(token, path, fields, 20);
-  } catch (error) {
-    const classified = classifyMetaTokenError(error);
-    warnings.push(`${path}: ${classified.reason}`);
-    return [];
-  }
 }
 
 function assetId(workspaceOwner: string, metaId: string) {
@@ -53,206 +32,180 @@ function adAccountStatus(value: unknown) {
 }
 
 export async function POST(req: Request) {
-  if (!sameOrigin(req)) {
-    return Response.json({ error: 'Nguồn yêu cầu không hợp lệ.' }, { status: 403 });
-  }
+  if (!sameOrigin(req)) return Response.json({ error: 'Nguồn yêu cầu không hợp lệ.' }, { status: 403 });
 
   try {
     const workspaceOwner = await owner();
     const input = requestSchema.parse(await req.json());
     const source = await getMetaTokenSecret(workspaceOwner, input.tokenId);
+    const [storedSnapshots, existing] = await Promise.all([
+      list(workspaceOwner, 'account-snapshot') as Promise<StoredAccountSnapshot[]>,
+      list(workspaceOwner, 'asset') as Promise<Asset[]>,
+    ]);
+    const savedSnapshot = storedSnapshots.find((snapshot) => snapshot.tokenId === input.tokenId);
+    let snapshot: StoredAccountSnapshot;
+
+    if (savedSnapshot) {
+      snapshot = savedSnapshot;
+    } else {
+      const uidHint = source.record.metaUserId || uidFromLabel(source.record.label);
+      let cookie = '';
+      try { cookie = await getSessionCookieByUid(workspaceOwner, uidHint); } catch { cookie = ''; }
+      const discovered = await discoverAccountSnapshot({ token: source.token, cookie: cookie || undefined });
+      snapshot = toStoredAccountSnapshot(workspaceOwner, input.tokenId, discovered);
+      await put(workspaceOwner, 'account-snapshot', snapshot).run();
+    }
+
     const now = new Date().toISOString();
-    const warnings: string[] = [];
-    const uidHint = source.record.metaUserId || uidFromLabel(source.record.label);
-    let cookie = '';
-    try { cookie = await getSessionCookieByUid(workspaceOwner, uidHint); } catch { cookie = ''; }
-
-    const inspection = await inspectAccount({ token: source.token, cookie: cookie || undefined });
-    warnings.push(...inspection.warnings);
-    const graphOk = inspection.source !== 'cookie';
-
-    const [listedBusinesses, listedAccounts] = graphOk
-      ? await Promise.all([
-        safeList(source.token, `${inspection.me.id}/businesses`, 'id,name,verification_status,timezone_id,primary_page,created_time', warnings),
-        safeList(source.token, `${inspection.me.id}/adaccounts`, 'id,name,account_status,spend_cap,currency,disable_reason', warnings),
-      ])
-      : [[], []] as const;
-    const businesses = listedBusinesses.length
-      ? listedBusinesses
-      : inspection.businesses.map((item) => ({ id: item.id, name: item.name, verification_status: item.verificationStatus || 'unknown' }));
-    const directAccounts = listedAccounts.length
-      ? listedAccounts
-      : inspection.adAccounts.map((item) => ({ id: item.id, name: item.name, account_status: item.accountStatus || 1 }));
-
-    const metaUserId = inspection.me.id;
-    const metaUserName = inspection.me.name;
-    const existing = await list(workspaceOwner, 'asset') as Asset[];
     const existingById = new Map(existing.map((asset) => [asset.id, asset] as const));
-    const importedById = new Map<string, Asset>();
+    const imported = new Map<string, Asset>();
+    const common = (current?: Asset) => ({
+      source: 'meta',
+      checked: snapshot.capturedAt || now,
+      sourceTokenId: source.record.id,
+      createdById: snapshot.actor.id || current?.createdById,
+      createdByName: snapshot.actor.name || current?.createdByName,
+      healthNote: `Đồng bộ từ Account Snapshot (${snapshot.source}).`,
+    });
 
-    function saveAsset(asset: Asset) {
-      const previous = importedById.get(asset.id);
-      if (previous && previous.parent && !asset.parent) return;
-      importedById.set(asset.id, asset);
-    }
-
-    function common(current: Asset | undefined) {
-      return {
-        source: 'meta',
-        checked: now,
-        sourceTokenId: source.record.id,
-        createdById: metaUserId || current?.createdById,
-        createdByName: metaUserName || current?.createdByName,
-        healthNote: `Đồng bộ từ ${source.record.label} (${inspection.source === 'cookie' ? 'cookie session' : 'Graph token'}).`,
-      };
-    }
-
-    function addAccount(account: MetaObject, parent = '') {
-      const accountId = text(account.id).replace(/^act_/, '');
-      if (!/^\d{5,30}$/.test(accountId)) return;
-      const recordId = assetId(workspaceOwner, accountId);
-      const current = existingById.get(recordId);
-      const currency = text(account.currency) || current?.currency || '';
-      const spendCap = text(account.spend_cap);
-      saveAsset({
+    for (const account of snapshot.adAccounts) {
+      const id = assetId(workspaceOwner, account.id);
+      const current = existingById.get(id);
+      const currency = account.currency || current?.currency || '';
+      const asset: Asset = {
         ...current,
-        id: recordId,
-        metaId: accountId,
-        name: text(account.name) || current?.name || `Ads ${accountId}`,
+        id,
+        metaId: account.id,
+        name: account.name || current?.name || `Ads ${account.id}`,
         type: 'TKQC',
-        status: adAccountStatus(account.account_status),
+        status: adAccountStatus(account.accountStatus),
         verified: false,
         country: current?.country || 'Chưa rõ',
         tier: current?.tier || '—',
-        limit: spendCap && spendCap !== '0' ? `${spendCap} ${currency} (đơn vị API)` : current?.limit || 'Chưa thiết lập',
-        parent,
+        limit: account.spendCap && account.spendCap !== '0' ? `${account.spendCap} ${currency} (đơn vị API)` : current?.limit || 'Chưa thiết lập',
+        parent: account.businessIds[0] ? assetId(workspaceOwner, account.businessIds[0]) : '',
         currency,
-        metaStatus: Number(account.account_status || 0),
+        metaStatus: Number(account.accountStatus || 0),
+        assetSources: account.sources,
         ...common(current),
-      });
+      };
+      asset.openUrl = canonicalOpenUrl(asset);
+      imported.set(id, asset);
     }
 
-    function addSimple(item: MetaObject, type: 'Page' | 'Dataset/Pixel', parent = '') {
-      const metaId = text(item.id);
-      if (!/^\d{5,30}$/.test(metaId)) return;
-      const recordId = assetId(workspaceOwner, metaId);
-      const current = existingById.get(recordId);
-      saveAsset({
+    for (const page of snapshot.pages) {
+      const id = assetId(workspaceOwner, page.id);
+      const current = existingById.get(id);
+      const asset: Asset = {
         ...current,
-        id: recordId,
-        metaId,
-        name: text(item.name) || current?.name || `${type} ${metaId}`,
-        type,
+        id,
+        metaId: page.id,
+        name: page.name || current?.name || `Page ${page.id}`,
+        type: 'Page',
         status: 'Truy cập được',
         verified: false,
         country: current?.country || 'Chưa rõ',
         tier: current?.tier || '—',
         limit: current?.limit || '—',
-        parent,
+        parent: page.businessIds[0] ? assetId(workspaceOwner, page.businessIds[0]) : '',
+        assetSources: page.sources,
+        ...common(current),
+      };
+      asset.openUrl = canonicalOpenUrl(asset);
+      imported.set(id, asset);
+    }
+
+    for (const pixel of snapshot.pixels) {
+      const id = assetId(workspaceOwner, pixel.id);
+      const current = existingById.get(id);
+      imported.set(id, {
+        ...current,
+        id,
+        metaId: pixel.id,
+        name: pixel.name || current?.name || `Pixel ${pixel.id}`,
+        type: 'Dataset/Pixel',
+        status: 'Truy cập được',
+        verified: false,
+        country: current?.country || 'Chưa rõ',
+        tier: current?.tier || '—',
+        limit: current?.limit || '—',
+        parent: pixel.businessIds[0] ? assetId(workspaceOwner, pixel.businessIds[0]) : '',
+        assetSources: pixel.sources,
         ...common(current),
       });
     }
 
-    directAccounts.forEach((account) => addAccount(account));
-    inspection.pages.forEach((page) => addSimple(page as unknown as MetaObject, 'Page'));
-
-    for (const business of businesses) {
-      const businessId = text(business.id);
-      if (!/^\d{5,30}$/.test(businessId)) continue;
-      const primaryPage = objectValue(business.primary_page);
-      const businessRecordId = assetId(workspaceOwner, businessId);
-      const currentBusiness = existingById.get(businessRecordId);
-      const verificationStatus = text(business.verification_status) || 'unknown';
-      const nested = graphOk
-        ? await Promise.all([
-          safeList(source.token, `${businessId}/owned_ad_accounts`, 'id,name,account_status,spend_cap,currency,disable_reason', warnings),
-          safeList(source.token, `${businessId}/client_ad_accounts`, 'id,name,account_status,spend_cap,currency,disable_reason', warnings),
-          safeList(source.token, `${businessId}/owned_pages`, 'id,name', warnings),
-          safeList(source.token, `${businessId}/client_pages`, 'id,name', warnings),
-          safeList(source.token, `${businessId}/adspixels`, 'id,name', warnings),
-        ])
-        : [[], [], [], [], []] as const;
-      const [ownedAccounts, clientAccounts, ownedPages, clientPages, pixels] = nested;
-      [...ownedAccounts, ...clientAccounts].forEach((account) => addAccount(account, businessRecordId));
-      [...ownedPages, ...clientPages].forEach((page) => addSimple(page, 'Page', businessRecordId));
-      pixels.forEach((pixel) => addSimple(pixel, 'Dataset/Pixel', businessRecordId));
-
-      let profile = {
-        name: text(business.name) || currentBusiness?.name || `Business ${businessId}`,
-        verificationStatus,
-        timezoneId: text(business.timezone_id) || currentBusiness?.timezoneId,
-        primaryPageId: text(primaryPage.id) || currentBusiness?.primaryPageId,
-        primaryPageName: text(primaryPage.name) || currentBusiness?.primaryPageName,
-        createdTime: text(business.created_time) || currentBusiness?.creationTime,
-        adAccountCount: ownedAccounts.length + clientAccounts.length,
-        pageCount: ownedPages.length + clientPages.length,
-        userCount: currentBusiness?.userCount,
-        country: currentBusiness?.country,
-        shareLimit: currentBusiness?.limit,
-        kind: '',
-      };
-      if (graphOk) {
-        try { profile = { ...profile, ...(await readBmProfile(source.token, businessId)) }; } catch { /* cookie/session token may block Graph BM fields */ }
-      }
-
-      saveAsset(applyBmProfile({
-        ...currentBusiness,
-        id: businessRecordId,
-        metaId: businessId,
-        name: profile.name,
+    for (const business of snapshot.businesses) {
+      const id = assetId(workspaceOwner, business.id);
+      const current = existingById.get(id);
+      const asset: Asset = {
+        ...current,
+        id,
+        metaId: business.id,
+        name: business.name || current?.name || `Business ${business.id}`,
         type: 'BM',
         status: 'Truy cập được',
-        verified: verificationStatus.toLowerCase() === 'verified',
-        verificationStatus,
-        country: currentBusiness?.country || 'Chưa rõ',
-        tier: currentBusiness?.tier || 'Chưa rõ',
-        limit: currentBusiness?.limit || 'Chưa rõ',
+        verified: business.verificationStatus?.toLowerCase() === 'verified',
+        verificationStatus: business.verificationStatus || current?.verificationStatus || 'unknown',
+        country: current?.country || 'Chưa rõ',
+        tier: business.bmType,
+        bmType: business.bmType,
+        accountCapacity: business.accountCapacity,
+        limit: business.accountCapacity === null ? 'unknown' : String(business.accountCapacity),
         parent: '',
-        creationTime: text(business.created_time) || currentBusiness?.creationTime,
-        timezoneId: text(business.timezone_id) || currentBusiness?.timezoneId,
-        primaryPageId: text(primaryPage.id) || currentBusiness?.primaryPageId,
-        primaryPageName: text(primaryPage.name) || currentBusiness?.primaryPageName,
-        ...common(currentBusiness),
-      }, profile));
+        creationTime: business.createdTime || current?.creationTime,
+        timezoneId: business.timezoneId || current?.timezoneId,
+        primaryPageId: business.primaryPage?.id || current?.primaryPageId,
+        primaryPageName: business.primaryPage?.name || current?.primaryPageName,
+        adAccountCount: business.adAccountCount,
+        pageCount: business.pageIds.length,
+        currencies: business.currencies,
+        currencyMode: business.currencyMode,
+        currency: business.currency,
+        assetSources: business.sources,
+        accessLinkStatus: current?.accessLinkStatus || 'none',
+        shopStatus: current?.shopStatus || 'not_ready',
+        ...common(current),
+      };
+      asset.openUrl = canonicalOpenUrl(asset);
+      imported.set(id, asset);
     }
 
-    const unique = Array.from(importedById.values());
-    const statements = unique.map((asset) => put(workspaceOwner, 'asset', asset));
-    for (let index = 0; index < statements.length; index += 50) {
-      await db().batch(statements.slice(index, index + 50));
-    }
+    const assets = [...imported.values()];
+    const statements = assets.map((asset) => put(workspaceOwner, 'asset', asset));
+    for (let index = 0; index < statements.length; index += 50) await db().batch(statements.slice(index, index + 50));
 
     await updateMetaToken(workspaceOwner, source.record, {
       status: 'active',
-      metaUserId: metaUserId || source.record.metaUserId,
-      metaUserName: metaUserName || source.record.metaUserName,
-      lastCheckedAt: now,
+      metaUserId: snapshot.actor.id || source.record.metaUserId,
+      metaUserName: snapshot.actor.name || source.record.metaUserName,
+      lastCheckedAt: snapshot.capturedAt,
       lastUsedAt: now,
       lastError: undefined,
       lastErrorCode: undefined,
       lastErrorSubcode: undefined,
     });
-    await audit(workspaceOwner, `Đồng bộ ${unique.length} tài nguyên từ token ${source.record.label}`).run();
+    await audit(workspaceOwner, `Đồng bộ ${assets.length} tài nguyên từ Account Snapshot của token ${source.record.label}`).run();
 
-    const businessesCount = unique.filter((asset) => asset.type === 'BM').length;
-    const adAccountsCount = unique.filter((asset) => asset.type === 'TKQC').length;
-    const pagesCount = unique.filter((asset) => asset.type === 'Page').length;
-    const pixelsCount = unique.filter((asset) => asset.type === 'Dataset/Pixel').length;
-
+    const businesses = assets.filter((asset) => asset.type === 'BM').length;
+    const adAccounts = assets.filter((asset) => asset.type === 'TKQC').length;
+    const pages = assets.filter((asset) => asset.type === 'Page').length;
+    const pixels = assets.filter((asset) => asset.type === 'Dataset/Pixel').length;
     return Response.json({
       ok: true,
-      imported: unique.length,
-      businesses: businessesCount,
-      adAccounts: adAccountsCount,
-      pages: pagesCount,
-      pixels: pixelsCount,
-      warnings: warnings.slice(0, 12),
-      message: `Đã đồng bộ ${unique.length} tài nguyên từ ${source.record.label}: ${businessesCount} BM, ${adAccountsCount} ADS, ${pagesCount} Page${pixelsCount ? `, ${pixelsCount} Pixel/Dataset` : ''}.`,
+      imported: assets.length,
+      businesses,
+      adAccounts,
+      pages,
+      pixels,
+      confirmedPermissions: snapshot.confirmedPermissions,
+      inferredPermissions: snapshot.inferredPermissions,
+      warnings: snapshot.warnings,
+      snapshotAt: snapshot.capturedAt,
+      message: `Đã đồng bộ cùng Account Snapshot: ${businesses} BM, ${adAccounts} ADS, ${pages} Page${pixels ? `, ${pixels} Pixel/Dataset` : ''}.`,
     });
   } catch (error) {
-    if (error instanceof z.ZodError) {
-      return Response.json({ error: 'Token nguồn không hợp lệ.' }, { status: 400 });
-    }
+    if (error instanceof z.ZodError) return Response.json({ error: 'Token nguồn không hợp lệ.' }, { status: 400 });
     return Response.json({ error: (error as Error).message }, { status: 400 });
   }
 }

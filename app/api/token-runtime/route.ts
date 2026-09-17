@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { Asset } from '../../../lib/data';
+import { discoverAccountSnapshot, toStoredAccountSnapshot } from '../../../lib/account-snapshot';
 import { audit, db, list, owner, put } from '../../../lib/server';
-import { inspectAccount } from '../../../lib/account-inspect';
 import { getSessionCookieByUid, uidFromLabel } from '../../../lib/credential-vault';
 import {
   classifyMetaTokenError,
@@ -9,15 +9,12 @@ import {
   encryptToken,
   getMetaTokenSecret,
   getMetaTokens,
-  graphListWithToken,
   MetaTokenError,
   publicToken,
   tokenFingerprint,
   type MetaTokenRecord,
   type MetaTokenStatus,
 } from '../../../lib/meta-tokens';
-
-type MetaObject = Record<string, unknown>;
 
 type TokenInventory = {
   id: string;
@@ -26,6 +23,8 @@ type TokenInventory = {
   metaUserId?: string;
   metaUserName?: string;
   permissions: string[];
+  confirmedPermissions: string[];
+  inferredPermissions: string[];
   businessCount: number;
   verifiedBusinessCount: number;
   pageCount: number;
@@ -74,26 +73,16 @@ function sameOrigin(req: Request) {
   return !origin || origin === new URL(req.url).origin;
 }
 
-function text(value: unknown) {
-  return value === undefined || value === null ? '' : String(value).trim();
-}
-
 function inventoryId(workspaceOwner: string, tokenId: string) {
   return `${workspaceOwner}:token-inventory:${tokenId}`;
 }
 
-function deleteRecord(workspaceOwner: string, kind: string, id: string) {
-  return db().prepare('DELETE FROM records WHERE owner = ? AND kind = ? AND id = ?').bind(workspaceOwner, kind, id);
+function snapshotId(workspaceOwner: string, tokenId: string) {
+  return `${workspaceOwner}:account-snapshot:${tokenId}`;
 }
 
-async function safeList(token: string, path: string, fields: string, warnings: string[]) {
-  try {
-    return await graphListWithToken(token, path, fields);
-  } catch (error) {
-    const classified = classifyMetaTokenError(error);
-    warnings.push(`${path}: ${classified.reason}`);
-    return [];
-  }
+function deleteRecord(workspaceOwner: string, kind: string, id: string) {
+  return db().prepare('DELETE FROM records WHERE owner = ? AND kind = ? AND id = ?').bind(workspaceOwner, kind, id);
 }
 
 function adBucket(statusValue: unknown) {
@@ -103,21 +92,38 @@ function adBucket(statusValue: unknown) {
   return 'restricted' as const;
 }
 
-function uniqueIds(rows: MetaObject[], normalize = (value: string) => value) {
-  return new Map(
-    rows
-      .map((row) => [normalize(text(row.id)), row] as const)
-      .filter(([id]) => /^\d{5,30}$/.test(id)),
-  );
+function emptyInventory(workspaceOwner: string, record: MetaTokenRecord, now: string, status: MetaTokenStatus, lastError: string): TokenInventory {
+  return {
+    id: inventoryId(workspaceOwner, record.id),
+    tokenId: record.id,
+    status,
+    permissions: [],
+    confirmedPermissions: [],
+    inferredPermissions: [],
+    businessCount: 0,
+    verifiedBusinessCount: 0,
+    pageCount: 0,
+    adAccountCount: 0,
+    liveAdCount: 0,
+    dieAdCount: 0,
+    restrictedAdCount: 0,
+    pixelCount: 0,
+    totalResources: 0,
+    warnings: [],
+    lastError,
+    scannedAt: now,
+    created: now,
+  };
 }
 
 async function scanToken(workspaceOwner: string, record: MetaTokenRecord, rawToken: string) {
   const now = new Date().toISOString();
   const token = cleanMetaToken(rawToken);
-  const warnings: string[] = [];
   if (!token || token.length < 20) {
-    throw new MetaTokenError('Token trống hoặc quá ngắn sau khi làm sạch ký tự xuống dòng/khoảng trắng.', { code: 400, httpStatus: 400 });
+    throw new MetaTokenError('Token trống hoặc quá ngắn sau khi làm sạch.', { code: 400, httpStatus: 400 });
   }
+
+  const warnings: string[] = [];
   const uidHint = record.metaUserId || uidFromLabel(record.label);
   let cookie = '';
   try {
@@ -125,92 +131,49 @@ async function scanToken(workspaceOwner: string, record: MetaTokenRecord, rawTok
   } catch (error) {
     warnings.push(`Cookie vault: ${(error as Error).message}`);
   }
+
   try {
-    const inspection = await inspectAccount({ token, cookie: cookie || undefined });
-    warnings.push(...inspection.warnings);
-    if (inspection.debug) {
-      if (inspection.debug.appId) warnings.push(`debug_token.app_id=${inspection.debug.appId}`);
-      if (inspection.debug.type) warnings.push(`debug_token.type=${inspection.debug.type}`);
-    }
-    if (inspection.source !== 'graph') warnings.push(`Nguồn check: ${inspection.source}.`);
-
-    const graphToken = inspection.workingToken || token;
-    let businesses = inspection.businesses.map((item) => ({
-      id: item.id,
-      name: item.name,
-      verification_status: item.verificationStatus || 'unknown',
-    })) as MetaObject[];
-    let directAds = inspection.adAccounts.map((item) => ({
-      id: item.id,
-      name: item.name,
-      account_status: item.accountStatus || 1,
-    })) as MetaObject[];
-
-    if (inspection.source !== 'cookie') {
-      const [graphBusinesses, graphAds] = await Promise.all([
-        safeList(graphToken, `${inspection.me.id}/businesses`, 'id,name,verification_status', warnings),
-        safeList(graphToken, `${inspection.me.id}/adaccounts`, 'id,name,account_status,disable_reason', warnings),
-      ]);
-      if (graphBusinesses.length) businesses = graphBusinesses;
-      if (graphAds.length) directAds = graphAds;
-    }
-
-    const pageMap = uniqueIds(inspection.pages as unknown as MetaObject[]);
-    for (const page of inspection.pages) pageMap.set(page.id, page as unknown as MetaObject);
-    const adMap = uniqueIds(directAds, (id) => id.replace(/^act_/, ''));
-    const pixelMap = new Map<string, MetaObject>();
-
-    for (const business of businesses) {
-      const businessId = text(business.id);
-      if (!/^\d{5,30}$/.test(businessId)) continue;
-      if (inspection.source === 'cookie') continue;
-      const [ownedAds, clientAds, ownedPages, clientPages, pixels] = await Promise.all([
-        safeList(graphToken, `${businessId}/owned_ad_accounts`, 'id,name,account_status,disable_reason', warnings),
-        safeList(graphToken, `${businessId}/client_ad_accounts`, 'id,name,account_status,disable_reason', warnings),
-        safeList(graphToken, `${businessId}/owned_pages`, 'id,name', warnings),
-        safeList(graphToken, `${businessId}/client_pages`, 'id,name', warnings),
-        safeList(graphToken, `${businessId}/adspixels`, 'id,name', warnings),
-      ]);
-      for (const [id, row] of uniqueIds([...ownedAds, ...clientAds], (value) => value.replace(/^act_/, ''))) adMap.set(id, row);
-      for (const [id, row] of uniqueIds([...ownedPages, ...clientPages])) pageMap.set(id, row);
-      for (const [id, row] of uniqueIds(pixels)) pixelMap.set(id, row);
-    }
-
-    const ads = [...adMap.values()];
-    const liveAdCount = ads.filter((account) => adBucket(account.account_status) === 'live').length;
-    const dieAdCount = ads.filter((account) => adBucket(account.account_status) === 'die').length;
-    const restrictedAdCount = Math.max(0, ads.length - liveAdCount - dieAdCount);
+    const snapshot = await discoverAccountSnapshot({ token, cookie: cookie || undefined });
+    warnings.push(...snapshot.warnings);
+    if (snapshot.source !== 'graph') warnings.push(`Nguồn check: ${snapshot.source}.`);
+    const workingToken = snapshot.workingCredential.token || token;
+    const liveAdCount = snapshot.adAccounts.filter((account) => adBucket(account.accountStatus) === 'live').length;
+    const dieAdCount = snapshot.adAccounts.filter((account) => adBucket(account.accountStatus) === 'die').length;
+    const restrictedAdCount = Math.max(0, snapshot.adAccounts.length - liveAdCount - dieAdCount);
     const inventory: TokenInventory = {
       id: inventoryId(workspaceOwner, record.id),
       tokenId: record.id,
       status: 'active',
-      metaUserId: inspection.me.id,
-      metaUserName: inspection.me.name,
-      permissions: inspection.permissions,
-      businessCount: businesses.length,
-      verifiedBusinessCount: businesses.filter((business) => text(business.verification_status).toLowerCase() === 'verified').length,
-      pageCount: pageMap.size,
-      adAccountCount: adMap.size,
+      metaUserId: snapshot.actor.id,
+      metaUserName: snapshot.actor.name,
+      permissions: snapshot.confirmedPermissions,
+      confirmedPermissions: snapshot.confirmedPermissions,
+      inferredPermissions: snapshot.inferredPermissions,
+      businessCount: snapshot.businesses.length,
+      verifiedBusinessCount: snapshot.businesses.filter((business) => business.verificationStatus?.toLowerCase() === 'verified').length,
+      pageCount: snapshot.pages.length,
+      adAccountCount: snapshot.adAccounts.length,
       liveAdCount,
       dieAdCount,
       restrictedAdCount,
-      pixelCount: pixelMap.size,
-      totalResources: businesses.length + pageMap.size + adMap.size + pixelMap.size,
-      warnings: warnings.filter((item, index, array) => array.indexOf(item) === index).slice(0, 20),
-      scannedAt: now,
+      pixelCount: snapshot.pixels.length,
+      totalResources: snapshot.businesses.length + snapshot.adAccounts.length + snapshot.pages.length + snapshot.pixels.length,
+      warnings: [...new Set(warnings)].slice(0, 40),
+      scannedAt: snapshot.capturedAt,
       created: now,
     };
 
     await db().batch([
       put(workspaceOwner, 'token-inventory', inventory),
+      put(workspaceOwner, 'account-snapshot', toStoredAccountSnapshot(workspaceOwner, record.id, snapshot)),
       put(workspaceOwner, 'meta-token', {
         ...record,
-        encrypted: await encryptToken(graphToken),
-        fingerprint: await tokenFingerprint(graphToken),
+        encrypted: await encryptToken(workingToken),
+        fingerprint: await tokenFingerprint(workingToken),
         status: 'active',
-        metaUserId: inventory.metaUserId || record.metaUserId,
-        metaUserName: inventory.metaUserName || record.metaUserName,
-        lastCheckedAt: now,
+        metaUserId: snapshot.actor.id || record.metaUserId,
+        metaUserName: snapshot.actor.name || record.metaUserName,
+        lastCheckedAt: snapshot.capturedAt,
         lastError: undefined,
         lastErrorCode: undefined,
         lastErrorSubcode: undefined,
@@ -220,25 +183,7 @@ async function scanToken(workspaceOwner: string, record: MetaTokenRecord, rawTok
     return inventory;
   } catch (error) {
     const classified = classifyMetaTokenError(error);
-    const inventory: TokenInventory = {
-      id: inventoryId(workspaceOwner, record.id),
-      tokenId: record.id,
-      status: classified.status,
-      permissions: [],
-      businessCount: 0,
-      verifiedBusinessCount: 0,
-      pageCount: 0,
-      adAccountCount: 0,
-      liveAdCount: 0,
-      dieAdCount: 0,
-      restrictedAdCount: 0,
-      pixelCount: 0,
-      totalResources: 0,
-      warnings: [],
-      lastError: classified.reason,
-      scannedAt: now,
-      created: now,
-    };
+    const inventory = emptyInventory(workspaceOwner, record, now, classified.status, classified.reason);
     await db().batch([
       put(workspaceOwner, 'token-inventory', inventory),
       put(workspaceOwner, 'meta-token', {
@@ -296,6 +241,7 @@ export async function POST(req: Request) {
       const deletes = input.ids.flatMap((id) => [
         deleteRecord(workspaceOwner, 'meta-token', id),
         deleteRecord(workspaceOwner, 'token-inventory', inventoryId(workspaceOwner, id)),
+        deleteRecord(workspaceOwner, 'account-snapshot', snapshotId(workspaceOwner, id)),
       ]);
       let purgedAssets = 0;
       if (input.purgeAssets) {
@@ -314,13 +260,12 @@ export async function POST(req: Request) {
       const byFingerprint = new Map(existing.map((record) => [record.fingerprint, record] as const));
       let imported = 0;
       let reused = 0;
-
       for (const item of input.items) {
         const token = cleanMetaToken(item.token);
         const fingerprint = await tokenFingerprint(token);
         let record = byFingerprint.get(fingerprint);
+        const now = new Date().toISOString();
         if (!record) {
-          const now = new Date().toISOString();
           record = {
             id: crypto.randomUUID(),
             label: item.label || (item.uid ? `UID ${item.uid}` : `Token ${existing.length + imported + 1}`),
@@ -337,12 +282,11 @@ export async function POST(req: Request) {
             ...record,
             label: item.label || record.label,
             encrypted: await encryptToken(token),
-            fingerprint,
             metaUserId: item.uid || record.metaUserId,
             lastError: undefined,
             lastErrorCode: undefined,
             lastErrorSubcode: undefined,
-            updated: new Date().toISOString(),
+            updated: now,
           };
           reused += 1;
         }
@@ -350,7 +294,6 @@ export async function POST(req: Request) {
         byFingerprint.set(fingerprint, record);
         inventories.push(await scanToken(workspaceOwner, record, token));
       }
-
       await audit(workspaceOwner, `Nạp và check token: mới ${imported}, dùng lại ${reused}`).run();
       return Response.json({ imported, reused, processed: input.items.length, inventories, tokens: await joinedRows(workspaceOwner), message: `Đã nạp và check ${input.items.length} token.` });
     }
@@ -360,17 +303,11 @@ export async function POST(req: Request) {
         const source = await getMetaTokenSecret(workspaceOwner, id);
         inventories.push(await scanToken(workspaceOwner, source.record, source.token));
       } catch (error) {
-        const records = await getMetaTokens(workspaceOwner);
-        const record = records.find((item) => item.id === id);
+        const record = (await getMetaTokens(workspaceOwner)).find((item) => item.id === id);
         if (!record) continue;
         const now = new Date().toISOString();
-        const reason = `Không giải mã được token đã lưu. Hãy nạp lại chính token này để app mã hóa lại bằng TOKEN_ENCRYPTION_KEY hiện tại. ${(error as Error).message}`;
-        const inventory: TokenInventory = {
-          id: inventoryId(workspaceOwner, record.id), tokenId: record.id, status: 'unknown_error', permissions: [],
-          businessCount: 0, verifiedBusinessCount: 0, pageCount: 0, adAccountCount: 0, liveAdCount: 0,
-          dieAdCount: 0, restrictedAdCount: 0, pixelCount: 0, totalResources: 0, warnings: [], lastError: reason,
-          scannedAt: now, created: now,
-        };
+        const reason = `Không giải mã được token đã lưu. Hãy nạp lại token này. ${(error as Error).message}`;
+        const inventory = emptyInventory(workspaceOwner, record, now, 'unknown_error', reason);
         await db().batch([
           put(workspaceOwner, 'token-inventory', inventory),
           put(workspaceOwner, 'meta-token', { ...record, status: 'unknown_error', lastCheckedAt: now, lastError: reason, updated: now }),

@@ -60,6 +60,7 @@ export type ManagedPage = {
   id: string;
   name: string;
   tasks: string[];
+  sources?: Array<'graph_accounts' | 'session' | 'bm_owned' | 'bm_client'>;
 };
 
 export type TokenInspection = {
@@ -87,13 +88,19 @@ export class MetaTokenError extends Error {
   code?: number;
   subcode?: number;
   httpStatus?: number;
+  title?: string;
+  retryable?: boolean;
+  body?: GraphBody;
 
-  constructor(message: string, options: { code?: number; subcode?: number; httpStatus?: number } = {}) {
+  constructor(message: string, options: { code?: number; subcode?: number; httpStatus?: number; title?: string; retryable?: boolean; body?: GraphBody } = {}) {
     super(message);
     this.name = 'MetaTokenError';
     this.code = options.code;
     this.subcode = options.subcode;
     this.httpStatus = options.httpStatus;
+    this.title = options.title;
+    this.retryable = options.retryable;
+    this.body = options.body;
   }
 }
 
@@ -216,6 +223,9 @@ function makeMetaError(response: Response, body: GraphBody) {
     code,
     subcode,
     httpStatus: response.status,
+    title: body.error?.error_user_title,
+    retryable: body.error?.is_transient === true || response.status === 429 || response.status >= 500,
+    body,
   });
 }
 

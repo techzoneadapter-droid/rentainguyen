@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { Asset } from '../../../lib/data';
+import { canonicalOpenUrl, metaAssetId } from '../../../lib/resource-model';
 import { list, owner, put } from '../../../lib/server';
 import {
   classifyMetaTokenError,
@@ -30,19 +31,6 @@ function text(value: unknown) {
 
 function objectValue(value: unknown): MetaObject {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as MetaObject : {};
-}
-
-function metaId(asset: Asset) {
-  if (asset.metaId && /^\d{5,30}$/.test(asset.metaId)) return asset.metaId;
-  return asset.id.match(/(\d{5,30})$/)?.[1] || '';
-}
-
-function officialUrl(asset: Asset) {
-  const id = metaId(asset);
-  if (asset.type === 'BM') return `https://business.facebook.com/settings/?business_id=${id}`;
-  if (asset.type === 'TKQC') return `https://adsmanager.facebook.com/adsmanager/manage/campaigns?act=${id}`;
-  if (asset.type === 'Page') return `https://www.facebook.com/${id}`;
-  return 'https://business.facebook.com/';
 }
 
 async function findAsset(workspaceOwner: string, id: string) {
@@ -86,7 +74,7 @@ function requiredPayload(payload: Record<string, unknown>, key: string) {
 }
 
 async function refreshAsset(workspaceOwner: string, asset: Asset, token: string, actor?: string) {
-  const id = metaId(asset);
+  const id = metaAssetId(asset);
   const now = new Date().toISOString();
   let details: MetaObject = {};
   if (asset.type === 'BM') details = await graphWithToken(token, id, { fields: 'id,name,verification_status,timezone_id,primary_page,created_time' }) as MetaObject;
@@ -114,7 +102,7 @@ export async function POST(req: Request) {
     const workspaceOwner = await owner();
     const input = requestSchema.parse(await req.json());
     const asset = await findAsset(workspaceOwner, input.assetId);
-    const id = metaId(asset);
+    const id = metaAssetId(asset);
     if (!id) throw new Error('Tài nguyên không có Meta ID hợp lệ.');
     const source = await getMetaTokenSecret(workspaceOwner, input.tokenId);
     const token = source.token;
@@ -124,7 +112,7 @@ export async function POST(req: Request) {
     let url = '';
 
     if (input.action === 'open_official') {
-      return Response.json({ ok: true, url: officialUrl(asset), message: 'Đã tạo link mở trang chính thức.' });
+      return Response.json({ ok: true, url: canonicalOpenUrl(asset), message: 'Đã tạo openUrl mở trang chính thức.' });
     }
 
     if (input.action === 'refresh') {
@@ -182,7 +170,7 @@ export async function POST(req: Request) {
     }
 
     await updateMetaToken(workspaceOwner, source.record, { status: 'active', lastUsedAt: new Date().toISOString(), lastError: undefined });
-    if (!url) url = officialUrl(asset);
+    if (!url) url = canonicalOpenUrl(asset);
     return Response.json({ ok: true, message, result, url });
   } catch (error) {
     if (error instanceof z.ZodError) return Response.json({ error: 'Dữ liệu thao tác không hợp lệ.' }, { status: 400 });
