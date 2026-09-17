@@ -1,4 +1,11 @@
 import { metaCookieUid, normalizeMetaCookie } from './credential-vault';
+import {
+  extractAssetsFromHtml,
+  mergeExtractedAssets,
+  reconcileSessionAssets,
+  sessionSurfaceFromUrl,
+  type ExtractedSessionAssets,
+} from './session-extract';
 
 export type SessionBusiness = { id: string; name: string; verificationStatus?: string };
 export type SessionAdAccount = { id: string; name: string; accountStatus?: number };
@@ -9,6 +16,7 @@ export type CookieInspection = {
   uid: string;
   name: string;
   dtsg: string;
+  lsd: string;
   tokens: string[];
   businesses: SessionBusiness[];
   adAccounts: SessionAdAccount[];
@@ -38,33 +46,23 @@ function isLoginHtml(url: string, html: string) {
   return /id="loginform"|name="email"[\s\S]{0,400}name="pass"|\/login\/identify/i.test(html) && !/"USER_ID"\s*:\s*"\d{5,}/.test(html);
 }
 
-async function facebookFetch(cookie: string, url: string, init: RequestInit = {}) {
+export async function facebookFetch(cookie: string, url: string, init: RequestInit = {}) {
   const headers = new Headers(init.headers);
   headers.set('Cookie', normalizeMetaCookie(cookie));
   headers.set('User-Agent', UA);
   headers.set('Accept-Language', 'en-US,en;q=0.9,vi;q=0.8');
   if (!headers.has('Accept')) headers.set('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8');
-  headers.set('Sec-Fetch-Site', 'none');
-  headers.set('Sec-Fetch-Mode', 'navigate');
+  if (!headers.has('Sec-Fetch-Site')) headers.set('Sec-Fetch-Site', 'none');
+  if (!headers.has('Sec-Fetch-Mode')) headers.set('Sec-Fetch-Mode', 'navigate');
   headers.set('Upgrade-Insecure-Requests', '1');
   const response = await fetch(url, {
     ...init,
     headers,
     redirect: 'follow',
-    signal: AbortSignal.timeout(8000),
+    signal: init.signal || AbortSignal.timeout(8000),
   });
   const text = await response.text();
   return { response, text, url: response.url };
-}
-
-function uniqueNamed(rows: Array<{ id: string; name: string }>) {
-  const map = new Map<string, { id: string; name: string }>();
-  for (const row of rows) {
-    if (!/^\d{5,30}$/.test(row.id)) continue;
-    const current = map.get(row.id);
-    if (!current || (row.name && row.name !== row.id && current.name === current.id)) map.set(row.id, row);
-  }
-  return [...map.values()];
 }
 
 function extractTokens(html: string) {
@@ -74,7 +72,7 @@ function extractTokens(html: string) {
   return [...found].filter((token) => token.length >= 80 && token.length <= 4096).slice(0, 8);
 }
 
-function extractDtsg(html: string) {
+export function extractDtsg(html: string) {
   return (
     html.match(/"DTSGInitialData"[^[]*\[[^\]]*\{"token":"([^"]+)"/)?.[1]
     || html.match(/"token":"([A-Za-z0-9:_-]{8,})","async_get_token"/)?.[1]
@@ -82,6 +80,12 @@ function extractDtsg(html: string) {
     || html.match(/\{"dtsg":\{"token":"([^"]+)"/)?.[1]
     || ''
   );
+}
+
+function extractLsd(html: string) {
+  return html.match(/"LSD"[^[]*\[[^\]]*\{"token":"([^"]+)"/)?.[1]
+    || html.match(/name="lsd"\s+value="([^"]+)"/)?.[1]
+    || '';
 }
 
 function extractProfile(html: string, fallbackUid: string) {
@@ -94,50 +98,12 @@ function extractProfile(html: string, fallbackUid: string) {
   return { uid, name: name || (uid ? `Meta User ${uid}` : '') };
 }
 
-function extractPairs(html: string, idPattern: RegExp, namePattern?: RegExp) {
-  const ids = [...html.matchAll(idPattern)].map((match) => match[1]);
-  const names = namePattern ? [...html.matchAll(namePattern)].map((match) => decodeHtml(match[1])) : [];
-  return uniqueNamed(ids.map((id, index) => ({ id, name: names[index] || `ID ${id}` })));
-}
-
-function extractTyped(html: string, keywords: string[], excludeIds: string[] = []) {
-  const skip = new Set(excludeIds);
-  const rows: Array<{ id: string; name: string }> = [];
-  const push = (id: string, name: string, index: number) => {
-    if (!/^\d{5,30}$/.test(id) || skip.has(id)) return;
-    const context = html.slice(Math.max(0, index - 90), index + 140).toLowerCase();
-    if (!keywords.some((keyword) => context.includes(keyword))) return;
-    rows.push({ id, name: decodeHtml(name) });
+function toSessionAssets(extracted: ExtractedSessionAssets) {
+  return {
+    businesses: extracted.businesses,
+    adAccounts: extracted.adAccounts.map((row) => ({ ...row, accountStatus: 1 as const })),
+    pages: extracted.pages.map((row) => ({ ...row, tasks: [] as string[] })),
   };
-  for (const match of html.matchAll(/"id"\s*:\s*"(\d{5,30})"\s*,\s*"name"\s*:\s*"([^"]{1,160})"/g)) {
-    push(match[1], match[2], match.index || 0);
-  }
-  for (const match of html.matchAll(/"name"\s*:\s*"([^"]{1,160})"\s*,\s*"id"\s*:\s*"(\d{5,30})"/g)) {
-    push(match[2], match[1], match.index || 0);
-  }
-  return uniqueNamed(rows);
-}
-
-function extractResources(html: string, uid = '') {
-  const businesses = uniqueNamed([
-    ...extractTyped(html, ['business', 'bizkit', 'business_id', 'businessid'], [uid]),
-    ...extractPairs(html, /"business(?:_i|I)d"\s*:\s*"(\d{5,30})"/g, /"business(?:Name|_name)"\s*:\s*"([^"]+)"/g),
-    ...[...html.matchAll(/[?&]business_id=(\d{5,30})/g)].map((match) => ({ id: match[1], name: `BM ${match[1]}` })),
-    ...[...html.matchAll(/\/business\/(\d{5,30})\//g)].map((match) => ({ id: match[1], name: `BM ${match[1]}` })),
-  ]).filter((row) => row.id !== uid);
-
-  const adAccounts = uniqueNamed([
-    ...extractTyped(html, ['adaccount', 'ad_account', 'act_', 'account_id', 'adaccountid'], [uid]),
-    ...extractPairs(html, /"account_id"\s*:\s*"(\d{5,30})"/g, /"account_name"\s*:\s*"([^"]+)"/g),
-    ...[...html.matchAll(/(?:act_|act=)(\d{5,30})/g)].map((match) => ({ id: match[1], name: `Ad account ${match[1]}` })),
-  ]).filter((row) => row.id !== uid).map((row) => ({ ...row, accountStatus: 1 }));
-
-  const pages = uniqueNamed([
-    ...extractTyped(html, ['page_id', 'pageid', 'managed_page', 'your_pages'], [uid]),
-    ...extractPairs(html, /"page(?:_i|I)d"\s*:\s*"(\d{5,30})"/g, /"page(?:Name|_name)"\s*:\s*"([^"]+)"/g),
-  ]).filter((row) => row.id !== uid).map((row) => ({ ...row, tasks: [] as string[] }));
-
-  return { businesses, adAccounts, pages };
 }
 
 async function graphqlViewer(cookie: string, uid: string, dtsg: string) {
@@ -164,7 +130,7 @@ async function graphqlViewer(cookie: string, uid: string, dtsg: string) {
     },
     body,
   });
-  return extractResources(text);
+  return toSessionAssets(extractAssetsFromHtml(text, uid, 'graphql'));
 }
 
 export async function inspectCookieSession(rawCookie: string): Promise<CookieInspection> {
@@ -177,12 +143,11 @@ export async function inspectCookieSession(rawCookie: string): Promise<CookieIns
   const warnings: string[] = [];
   let alive = false;
   let dtsg = '';
+  let lsd = '';
   let name = '';
   let uid = cookieUid;
   const tokens: string[] = [];
-  let businesses: SessionBusiness[] = [];
-  let adAccounts: SessionAdAccount[] = [];
-  let pages: SessionPage[] = [];
+  const parts: ExtractedSessionAssets[] = [];
 
   const results = await Promise.allSettled(SESSION_URLS.map((url) => facebookFetch(cookie, url)));
   for (const result of results) {
@@ -200,29 +165,28 @@ export async function inspectCookieSession(rawCookie: string): Promise<CookieIns
     if (profile.uid) uid = profile.uid;
     if (profile.name && profile.name !== `Meta User ${profile.uid}`) name = profile.name;
     dtsg = dtsg || extractDtsg(text);
+    lsd = lsd || extractLsd(text);
     for (const token of extractTokens(text)) {
       if (!tokens.includes(token)) tokens.push(token);
     }
-    const extracted = extractResources(text, uid);
-    businesses = uniqueNamed([...businesses, ...extracted.businesses]);
-    adAccounts = uniqueNamed([...adAccounts, ...extracted.adAccounts]).map((row) => ({ ...row, accountStatus: 1 }));
-    pages = uniqueNamed([...pages, ...extracted.pages]).map((row) => ({ ...row, tasks: [] as string[] }));
+    const surface = sessionSurfaceFromUrl(url);
+    if (surface !== 'home') parts.push(extractAssetsFromHtml(text, uid, surface));
   }
 
   if (!alive) {
     throw new Error('Cookie Facebook không còn phiên sống. Facebook trả về trang đăng nhập/checkpoint.');
   }
 
-  if (dtsg && businesses.length === 0) {
+  let extracted = reconcileSessionAssets(mergeExtractedAssets(parts), uid);
+
+  if (dtsg && extracted.businesses.length === 0) {
     try {
       const extra = await graphqlViewer(cookie, uid, dtsg);
-      businesses = uniqueNamed([...businesses, ...extra.businesses]);
-      adAccounts = uniqueNamed([...adAccounts, ...extra.adAccounts]).map((row) => ({ ...row, accountStatus: 1 }));
-      pages = uniqueNamed([...pages, ...extra.pages]).map((row) => ({ ...row, tasks: [] as string[] }));
+      extracted = reconcileSessionAssets(mergeExtractedAssets([extracted, extra]), uid);
     } catch (error) {
       warnings.push(`GraphQL session: ${(error as Error).message}`);
     }
-  } else {
+  } else if (!dtsg) {
     warnings.push('Không lấy được fb_dtsg từ HTML session. Vẫn dùng dữ liệu nhúng trong trang Facebook.');
   }
 
@@ -231,10 +195,11 @@ export async function inspectCookieSession(rawCookie: string): Promise<CookieIns
     uid,
     name: name || `Meta User ${uid}`,
     dtsg,
+    lsd,
     tokens,
-    businesses,
-    adAccounts,
-    pages,
+    businesses: extracted.businesses,
+    adAccounts: extracted.adAccounts.map((row) => ({ ...row, accountStatus: 1 })),
+    pages: extracted.pages.map((row) => ({ ...row, tasks: [] })),
     warnings,
   };
 }
