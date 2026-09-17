@@ -24,10 +24,20 @@ function assetId(workspaceOwner: string, metaId: string) {
 }
 
 function adAccountStatus(value: unknown) {
-  const status = Number(value || 0);
+  if (value === undefined || value === null || value === '') return 'Chưa đọc được';
+  const status = Number(value);
   if (status === 1) return 'LIVE';
   if ([2, 101].includes(status)) return 'DIE';
   return 'Hạn chế';
+}
+
+function isGenericBusinessName(name: string, businessId: string) {
+  return !name || new RegExp(`^(?:BM|Business)\\s+${businessId}$`, 'i').test(name.trim());
+}
+
+function knownVerification(value?: string) {
+  const normalized = String(value || '').trim();
+  return normalized && normalized.toLowerCase() !== 'unknown' ? normalized : undefined;
 }
 
 export async function POST(req: Request) {
@@ -61,20 +71,38 @@ export async function POST(req: Request) {
       const id = assetId(workspaceOwner, account.id);
       const current = existingById.get(id);
       const currency = account.currency || current?.currency || '';
+      const accountStatus = account.accountStatus;
       const asset: Asset = {
         ...current,
         id,
         metaId: account.id,
         name: account.name || current?.name || `Ads ${account.id}`,
         type: 'TKQC',
-        status: adAccountStatus(account.accountStatus),
+        status: adAccountStatus(accountStatus),
         verified: false,
-        country: current?.country || 'Chưa rõ',
+        country: account.country || 'Chưa đọc được',
         tier: current?.tier || '—',
         limit: account.spendCap && account.spendCap !== '0' ? `${account.spendCap} ${currency} (đơn vị API)` : current?.limit || 'Chưa thiết lập',
         parent: account.businessIds[0] ? assetId(workspaceOwner, account.businessIds[0]) : '',
         currency,
-        metaStatus: Number(account.accountStatus || 0),
+        metaStatus: accountStatus,
+        accountStatus,
+        disableReason: account.disableReason ?? current?.disableReason,
+        amountSpent: account.amountSpent || current?.amountSpent,
+        balance: account.balance || current?.balance,
+        spendCap: account.spendCap || current?.spendCap,
+        minDailyBudget: account.minDailyBudget || current?.minDailyBudget,
+        billingType: account.isPrepayAccount === true ? 'PREPAID' : account.isPrepayAccount === false ? 'POSTPAID' : current?.billingType || 'UNKNOWN',
+        hasFundingSource: account.fundingSource || account.fundingType || account.fundingDisplay ? true : current?.hasFundingSource,
+        fundingType: account.fundingType || current?.fundingType,
+        fundingDisplay: account.fundingDisplay || current?.fundingDisplay,
+        timezoneId: account.timezoneId || current?.timezoneId,
+        timezoneName: account.timezoneName || current?.timezoneName,
+        timezoneOffsetHoursUtc: account.timezoneOffsetHoursUtc ?? current?.timezoneOffsetHoursUtc,
+        ownerId: account.ownerId || current?.ownerId,
+        ownership: account.ownership || current?.ownership || 'unknown',
+        businessName: account.businessName || current?.businessName,
+        creationTime: account.createdTime || current?.creationTime,
         assetSources: account.sources,
         ...common(current),
       };
@@ -92,11 +120,16 @@ export async function POST(req: Request) {
         name: page.name || current?.name || `Page ${page.id}`,
         type: 'Page',
         status: 'Truy cập được',
-        verified: false,
         country: current?.country || 'Chưa rõ',
         tier: current?.tier || '—',
         limit: current?.limit || '—',
         parent: page.businessIds[0] ? assetId(workspaceOwner, page.businessIds[0]) : '',
+        category: page.category || current?.category,
+        verificationStatus: page.verificationStatus || current?.verificationStatus,
+        verified: page.verificationStatus ? page.verificationStatus.toLowerCase() === 'verified' : Boolean(current?.verified),
+        followersCount: page.followersCount ?? current?.followersCount,
+        fanCount: page.fanCount ?? current?.fanCount,
+        pageLink: page.link || current?.pageLink,
         assetSources: page.sources,
         ...common(current),
       };
@@ -119,6 +152,8 @@ export async function POST(req: Request) {
         tier: current?.tier || '—',
         limit: current?.limit || '—',
         parent: pixel.businessIds[0] ? assetId(workspaceOwner, pixel.businessIds[0]) : '',
+        creationTime: pixel.creationTime || current?.creationTime,
+        lastFiredTime: pixel.lastFiredTime || current?.lastFiredTime,
         assetSources: pixel.sources,
         ...common(current),
       });
@@ -127,27 +162,40 @@ export async function POST(req: Request) {
     for (const business of snapshot.businesses) {
       const id = assetId(workspaceOwner, business.id);
       const current = existingById.get(id);
+      const name = isGenericBusinessName(business.name, business.id) && current?.name && !isGenericBusinessName(current.name, business.id)
+        ? current.name
+        : business.name || current?.name || `Business ${business.id}`;
+      const verificationStatus = knownVerification(business.verificationStatus)
+        || knownVerification(current?.verificationStatus);
       const asset: Asset = {
         ...current,
         id,
         metaId: business.id,
-        name: business.name || current?.name || `Business ${business.id}`,
+        name,
         type: 'BM',
         status: 'Truy cập được',
-        verified: business.verificationStatus?.toLowerCase() === 'verified',
-        verificationStatus: business.verificationStatus || current?.verificationStatus || 'unknown',
-        country: current?.country || 'Chưa rõ',
+        verified: verificationStatus?.toLowerCase() === 'verified',
+        verificationStatus,
+        country: business.country || 'Chưa đọc được',
         tier: business.bmType,
         bmType: business.bmType,
         accountCapacity: business.accountCapacity,
         limit: business.accountCapacity === null ? 'unknown' : String(business.accountCapacity),
         parent: '',
         creationTime: business.createdTime || current?.creationTime,
+        updatedTime: business.updatedTime || current?.updatedTime,
+        vertical: business.vertical || current?.vertical,
+        twoFactorType: business.twoFactorType || current?.twoFactorType,
         timezoneId: business.timezoneId || current?.timezoneId,
         primaryPageId: business.primaryPage?.id || current?.primaryPageId,
         primaryPageName: business.primaryPage?.name || current?.primaryPageName,
         adAccountCount: business.adAccountCount,
-        pageCount: business.pageIds.length,
+        ownedAdAccountCount: business.ownedAdAccountCount,
+        pageCount: business.pageCount,
+        observedAdAccountCount: business.observedAdAccountCount,
+        observedOwnedAdAccountCount: business.observedOwnedAdAccountCount,
+        observedPageCount: business.observedPageCount,
+        bmDetailsStatus: business.detailsStatus,
         currencies: business.currencies,
         currencyMode: business.currencyMode,
         currency: business.currency,
@@ -161,7 +209,16 @@ export async function POST(req: Request) {
     }
 
     const assets = [...imported.values()];
-    const stale = existing.filter((asset) => asset.sourceTokenId === source.record.id && !imported.has(asset.id));
+    // BM tạo tại chỗ (creationStatus=created) phải được giữ ngay cả khi Meta chưa kịp
+    // trả nó trong /me/businesses hoặc lần scan này chỉ đọc được qua cookie session.
+    // Session HTML có thể trả thiếu khi một trang Facebook lỗi mạng. Chỉ xóa stale khi
+    // Graph là nguồn duy nhất và đã trả snapshot có thẩm quyền.
+    const authoritativeSync = snapshot.source === 'graph' && snapshot.warnings.length === 0;
+    const stale = authoritativeSync
+      ? existing.filter((asset) => (
+          asset.sourceTokenId === source.record.id && !imported.has(asset.id) && asset.creationStatus !== 'created'
+        ))
+      : [];
     const statements = [
       ...stale.map((asset) => db().prepare('DELETE FROM records WHERE owner = ? AND kind = ? AND id = ?').bind(workspaceOwner, 'asset', asset.id)),
       ...assets.map((asset) => put(workspaceOwner, 'asset', asset)),

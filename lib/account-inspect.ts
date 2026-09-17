@@ -1,5 +1,9 @@
 import { TOKEN_FULL_SCOPES, uniqueScopes } from './meta-scopes';
-import { inspectCookieSession } from './meta-session';
+import {
+  inspectCookieSession,
+  type SessionAdAccount,
+  type SessionBusiness,
+} from './meta-session';
 import { resolveAccountAvailability } from './resource-model';
 import {
   debugUserToken,
@@ -12,8 +16,8 @@ import {
 
 export type AccountInspection = TokenInspection & {
   source: 'graph' | 'cookie' | 'mixed';
-  businesses: Array<{ id: string; name: string; verificationStatus?: string }>;
-  adAccounts: Array<{ id: string; name: string; accountStatus?: number }>;
+  businesses: SessionBusiness[];
+  adAccounts: SessionAdAccount[];
   workingToken?: string;
   cookieAlive?: boolean;
   confirmedPermissions: string[];
@@ -21,10 +25,10 @@ export type AccountInspection = TokenInspection & {
 };
 
 function asPages(
-  rows: Array<{ id: string; name: string; tasks?: string[] }>,
+  rows: Array<Omit<ManagedPage, 'sources'>>,
   source: 'graph_accounts' | 'session',
 ): ManagedPage[] {
-  return rows.map((row) => ({ id: row.id, name: row.name, tasks: row.tasks || [], sources: [source] }));
+  return rows.map((row) => ({ ...row, tasks: row.tasks || [], sources: [source] }));
 }
 
 function mergePages(current: ManagedPage[], extra: ManagedPage[]) {
@@ -38,7 +42,9 @@ function mergePages(current: ManagedPage[], extra: ManagedPage[]) {
     }
     map.set(row.id, {
       ...existing,
-      ...(row.name && existing.name === existing.id ? row : {}),
+      ...Object.fromEntries(Object.entries(row).filter(([, value]) => value !== undefined && value !== null && value !== '')),
+      name: row.name && existing.name === existing.id ? row.name : existing.name || row.name,
+      businessIds: [...new Set([...(existing.businessIds || []), ...(row.businessIds || [])])],
       sources: [...new Set([...(existing.sources || []), ...(row.sources || [])])],
     });
   }

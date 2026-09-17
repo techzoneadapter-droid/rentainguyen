@@ -60,6 +60,12 @@ export type ManagedPage = {
   id: string;
   name: string;
   tasks: string[];
+  category?: string;
+  verificationStatus?: string;
+  followersCount?: number;
+  fanCount?: number;
+  link?: string;
+  businessIds?: string[];
   sources?: Array<'graph_accounts' | 'session' | 'bm_owned' | 'bm_client'>;
 };
 
@@ -254,6 +260,13 @@ export function isAppLoadError(error: unknown) {
     || ((code === 1 || code === 100 || code === 190) && /application/.test(message));
 }
 
+export function isGraphCompatibilityError(error: unknown) {
+  if (isAppLoadError(error)) return true;
+  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  const code = error instanceof MetaTokenError ? error.code : undefined;
+  return code === 1 && /invalid request|request could not be processed|unknown error/.test(message);
+}
+
 function graphTokenKey(token: string) {
   return `${token.slice(0, 18)}:${token.length}:${token.slice(-10)}`;
 }
@@ -350,20 +363,28 @@ async function metaRequest(
   const attempts: GraphCallStyle[] = method === 'GET'
     ? [
         { version, mode: 'get-query', ua: UA_WEB },
+        { version, mode: 'post-get', ua: UA_WEB },
         { version: '', mode: 'get-query', ua: UA_FB },
+        { version: '', mode: 'post-get', ua: UA_FB },
+        { version: '', mode: 'oauth-header', ua: UA_WEB },
       ]
     : [
         { version, mode: 'form-post', ua: UA_WEB },
+        { version: '', mode: 'form-post', ua: UA_FB },
       ];
 
   let lastError: unknown;
   for (let index = 0; index < attempts.length; index += 1) {
     try {
-      return await metaRequestOnce(token, path, method, params, attempts[index]);
+      const body = await metaRequestOnce(token, path, method, params, attempts[index]);
+      // A session/extension token may fail on the versioned URL but succeed on the
+      // compatibility URL. Do not leave that token blocked after a successful fallback.
+      graphAppLoadUntil.delete(graphTokenKey(token));
+      return body;
     } catch (error) {
       lastError = error;
       rememberAppLoad(token, error);
-      const canRetry = index < attempts.length - 1 && isAppLoadError(error);
+      const canRetry = index < attempts.length - 1 && isGraphCompatibilityError(error);
       if (!canRetry) throw error;
     }
   }
@@ -527,7 +548,15 @@ export async function inspectUserToken(rawToken: string): Promise<TokenInspectio
   let pages: ManagedPage[] = [];
   if (!isGraphTokenBlocked(token)) {
     try {
-      const rows = await graphListWithToken(token, graphEdge(actor, 'accounts'), 'id,name,tasks', 4);
+      let rows: MetaObject[];
+      try {
+        rows = await graphListWithToken(token, graphEdge(actor, 'accounts'), 'id,name,category,verification_status,followers_count,fan_count,link,tasks', 4);
+      } catch (error) {
+        const fieldError = error instanceof MetaTokenError && [100, 200].includes(error.code || -1);
+        if (!fieldError) throw error;
+        rows = await graphListWithToken(token, graphEdge(actor, 'accounts'), 'id,name,tasks', 4);
+        warnings.push('accounts: một số field Page mở rộng không được cấp; đã dùng id, name và tasks.');
+      }
       const map = new Map<string, ManagedPage>();
       for (const row of rows) {
         const id = text(row.id);
@@ -536,6 +565,11 @@ export async function inspectUserToken(rawToken: string): Promise<TokenInspectio
           id,
           name: text(row.name) || 'Facebook Page',
           tasks: Array.isArray(row.tasks) ? row.tasks.map(String) : [],
+          category: text(row.category) || undefined,
+          verificationStatus: text(row.verification_status) || undefined,
+          followersCount: Number(row.followers_count || 0) || undefined,
+          fanCount: Number(row.fan_count || 0) || undefined,
+          link: text(row.link) || undefined,
         });
       }
       pages = Array.from(map.values());
@@ -663,4 +697,14 @@ export function classifyMetaTokenError(error: unknown): {
   }
 
   return { status, reason, code, subcode };
+}
+
+/**
+ * Meta trả error_subcode 1690114 khi tài khoản tạo đủ số Business Manager.
+ * Một số bối cảnh Graph chỉ trả message, nên kiểm tra cả hai.
+ */
+export function looksLikeBusinessLimit(message: string, subcode?: number) {
+  if (subcode === 1690114) return true;
+  const lower = String(message || '').toLowerCase();
+  return /business.{0,80}(limit|maximum|too many|cannot create|can't create|can not create|not eligible)|(limit|maximum).{0,80}business|reached.{0,40}business|not eligible.{0,40}business|đã đạt giới hạn.{0,40}(business|doanh nghiệp)/.test(lower);
 }

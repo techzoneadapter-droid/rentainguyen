@@ -1,15 +1,61 @@
 import { metaCookieUid, normalizeMetaCookie } from './credential-vault';
 import {
   extractAssetsFromHtml,
+  extractBusinessProfileFromHtml,
   mergeExtractedAssets,
+  protectKnownBusinesses,
   reconcileSessionAssets,
   sessionSurfaceFromUrl,
   type ExtractedSessionAssets,
 } from './session-extract';
 
-export type SessionBusiness = { id: string; name: string; verificationStatus?: string };
-export type SessionAdAccount = { id: string; name: string; accountStatus?: number };
-export type SessionPage = { id: string; name: string; tasks: string[] };
+export type SessionBusiness = {
+  id: string;
+  name: string;
+  verificationStatus?: string;
+  timezoneId?: string;
+  accountCapacity?: number;
+  adAccountCount?: number;
+  ownedAdAccountCount?: number;
+  pageCount?: number;
+  country?: string;
+  createdTime?: string;
+  updatedTime?: string;
+  vertical?: string;
+  twoFactorType?: string;
+};
+export type SessionAdAccount = {
+  id: string;
+  name: string;
+  accountStatus?: number;
+  disableReason?: number;
+  currency?: string;
+  amountSpent?: string;
+  balance?: string;
+  spendCap?: string;
+  minDailyBudget?: string;
+  timezoneId?: string;
+  timezoneName?: string;
+  isPrepayAccount?: boolean;
+  fundingSource?: string;
+  ownerId?: string;
+  businessName?: string;
+  country?: string;
+  ownership?: 'owned' | 'client' | 'unknown';
+  createdTime?: string;
+  businessIds?: string[];
+};
+export type SessionPage = {
+  id: string;
+  name: string;
+  tasks: string[];
+  category?: string;
+  verificationStatus?: string;
+  followersCount?: number;
+  fanCount?: number;
+  link?: string;
+  businessIds?: string[];
+};
 
 export type CookieInspection = {
   alive: boolean;
@@ -65,6 +111,128 @@ export async function facebookFetch(cookie: string, url: string, init: RequestIn
   return { response, text, url: response.url };
 }
 
+export async function inspectAdAccountSession(
+  rawCookie: string,
+  accountId: string,
+  businessId = '',
+): Promise<SessionAdAccount | null> {
+  const cookie = normalizeMetaCookie(rawCookie);
+  const uid = metaCookieUid(cookie);
+  const cleanAccountId = String(accountId || '').replace(/^act_/, '');
+  if (!uid || !/^\d{5,30}$/.test(cleanAccountId)) return null;
+  const urls = [
+    `https://adsmanager.facebook.com/adsmanager/manage/campaigns?act=${encodeURIComponent(cleanAccountId)}`,
+    `https://business.facebook.com/settings/ad-accounts?business_id=${encodeURIComponent(businessId)}&selected_asset_id=${encodeURIComponent(cleanAccountId)}`,
+  ];
+  const results = await Promise.allSettled(urls.map((url) => facebookFetch(cookie, url)));
+  const parts = results.flatMap((result) => {
+    if (result.status !== 'fulfilled' || isLoginHtml(result.value.url, result.value.text)) return [];
+    return [extractAssetsFromHtml(result.value.text, uid, 'ads')];
+  });
+  const account = mergeExtractedAssets(parts).adAccounts.find((row) => row.id === cleanAccountId);
+  if (!account) return null;
+  const hasSpecificName = Boolean(account.name && !new RegExp(`^(?:Ads|Ad account)\\s+${cleanAccountId}$`, 'i').test(account.name));
+  const hasDetails = [
+    account.accountStatus,
+    account.currency,
+    account.amountSpent,
+    account.balance,
+    account.spendCap,
+    account.timezoneId,
+    account.ownerId,
+    account.fundingSource,
+  ].some((value) => value !== undefined && value !== null && value !== '');
+  if (!hasSpecificName && !hasDetails) return null;
+  return {
+    ...account,
+    tasks: undefined,
+    ownership: account.ownerId === businessId
+      ? 'owned'
+      : account.ownerId
+        ? 'client'
+        : account.ownership || 'unknown',
+    businessIds: [...new Set([...(account.businessIds || []), businessId].filter(Boolean))],
+  } as SessionAdAccount;
+}
+
+async function inspectBusinessPages(
+  cookie: string,
+  uid: string,
+  businesses: SessionBusiness[],
+  warnings: string[],
+) {
+  const parts: ExtractedSessionAssets[] = [];
+  const targets = businesses.slice(0, 30);
+  const knownBusinessIds = new Set(businesses.map((business) => business.id));
+  for (let offset = 0; offset < targets.length; offset += 3) {
+    const chunk = await Promise.allSettled(targets.slice(offset, offset + 3).map(async (business) => {
+      const suffix = `business_id=${encodeURIComponent(business.id)}`;
+      const requestedPages = [
+        `https://business.facebook.com/settings/info?${suffix}`,
+        `https://business.facebook.com/settings/ad-accounts?${suffix}`,
+        `https://business.facebook.com/settings/pages?${suffix}`,
+      ];
+      const responses = await Promise.allSettled(requestedPages.map((url) => facebookFetch(cookie, url)));
+      const readable = responses.flatMap((response, index) => {
+        if (response.status !== 'fulfilled') return [];
+        if (isLoginHtml(response.value.url, response.value.text)) return [];
+        return [{ ...response.value, requestedUrl: requestedPages[index] }];
+      });
+      if (!readable.length) throw new Error(`Session bị chuyển về login hoặc không mở được BM ${business.id}.`);
+      const extractedParts = readable.map((result) => extractAssetsFromHtml(
+        result.text,
+        uid,
+        /ad[-_]?accounts|adaccounts/i.test(`${result.requestedUrl} ${result.url}`) ? 'ads' : 'business',
+      ));
+      const extracted = reconcileSessionAssets(protectKnownBusinesses({
+        businesses: extractedParts.flatMap((part) => part.businesses),
+        adAccounts: extractedParts.flatMap((part) => part.adAccounts),
+        pages: extractedParts.flatMap((part) => part.pages),
+      }, knownBusinessIds), uid);
+      const profile = readable
+        .map((result) => extractBusinessProfileFromHtml(result.text, business.id))
+        .filter((row): row is NonNullable<typeof row> => Boolean(row))
+        .reduce((current, row) => ({
+          ...current,
+          ...Object.fromEntries(Object.entries(row).filter(([, value]) => value !== undefined && value !== null && value !== '')),
+          id: business.id,
+          name: row.name || current.name,
+        }), { id: business.id, name: '' });
+      const relatedAds = extracted.adAccounts.map((account) => ({
+        ...account,
+        ownership: account.ownerId === business.id
+          ? 'owned' as const
+          : account.ownerId
+            ? 'client' as const
+            : account.ownership || 'unknown' as const,
+        businessIds: [...new Set([...(account.businessIds || []), business.id])],
+      }));
+      const relatedPages = extracted.pages.map((page) => ({
+        ...page,
+        businessIds: [...new Set([...(page.businessIds || []), business.id])],
+      }));
+      return {
+        businesses: [{
+          ...business,
+          ...profile,
+          id: business.id,
+          name: profile.name || business.name,
+          adAccountCount: profile.adAccountCount,
+          ownedAdAccountCount: profile.ownedAdAccountCount,
+          pageCount: profile.pageCount,
+        }],
+        adAccounts: relatedAds,
+        pages: relatedPages,
+      } satisfies ExtractedSessionAssets;
+    }));
+    for (const result of chunk) {
+      if (result.status === 'fulfilled') parts.push(result.value);
+      else warnings.push(`Đọc chi tiết BM bằng session: ${(result.reason as Error).message}`);
+    }
+  }
+  return parts;
+}
+
 function extractTokens(html: string) {
   const found = new Set<string>();
   for (const match of html.matchAll(/"(?:accessToken|access_token)"\s*:\s*"(EAA[^"]+)"/g)) found.add(decodeHtml(match[1]));
@@ -101,7 +269,7 @@ function extractProfile(html: string, fallbackUid: string) {
 function toSessionAssets(extracted: ExtractedSessionAssets) {
   return {
     businesses: extracted.businesses,
-    adAccounts: extracted.adAccounts.map((row) => ({ ...row, accountStatus: 1 as const })),
+    adAccounts: extracted.adAccounts,
     pages: extracted.pages.map((row) => ({ ...row, tasks: [] as string[] })),
   };
 }
@@ -190,6 +358,21 @@ export async function inspectCookieSession(rawCookie: string): Promise<CookieIns
     warnings.push('Không lấy được fb_dtsg từ HTML session. Vẫn dùng dữ liệu nhúng trong trang Facebook.');
   }
 
+  if (extracted.businesses.length) {
+    const knownBusinessIds = new Set(extracted.businesses.map((business) => business.id));
+    const detailParts = await inspectBusinessPages(cookie, uid, extracted.businesses, warnings);
+    if (detailParts.length) {
+      extracted = reconcileSessionAssets(protectKnownBusinesses(
+        {
+          businesses: [extracted, ...detailParts].flatMap((part) => part.businesses),
+          adAccounts: [extracted, ...detailParts].flatMap((part) => part.adAccounts),
+          pages: [extracted, ...detailParts].flatMap((part) => part.pages),
+        },
+        knownBusinessIds,
+      ), uid);
+    }
+  }
+
   return {
     alive,
     uid,
@@ -198,7 +381,7 @@ export async function inspectCookieSession(rawCookie: string): Promise<CookieIns
     lsd,
     tokens,
     businesses: extracted.businesses,
-    adAccounts: extracted.adAccounts.map((row) => ({ ...row, accountStatus: 1 })),
+    adAccounts: extracted.adAccounts,
     pages: extracted.pages.map((row) => ({ ...row, tasks: [] })),
     warnings,
   };

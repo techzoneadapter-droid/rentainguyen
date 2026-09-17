@@ -1,8 +1,9 @@
 import { z } from 'zod';
 import type { AccountSnapshot, StoredAccountSnapshot } from '../../../lib/account-snapshot';
 import { discoverAccountSnapshot, toStoredAccountSnapshot } from '../../../lib/account-snapshot';
+import { inspectAccount } from '../../../lib/account-inspect';
 import { generateBmAccessLink } from '../../../lib/bm-access-link';
-import { applyBmProfile, createBusinessAccount, readBmProfile } from '../../../lib/bm-profile';
+import { applyBmProfile, createBusinessAccount, prepareCookieSession, readBmProfile } from '../../../lib/bm-profile';
 import type { Asset } from '../../../lib/data';
 import { MetaCreationError, toStructuredMetaError, type StructuredMetaError } from '../../../lib/meta-errors';
 import { canonicalOpenUrl, runIndependentBatch } from '../../../lib/resource-model';
@@ -13,6 +14,8 @@ import {
   classifyMetaTokenError,
   encryptToken,
   getMetaTokenSecret,
+  looksLikeBusinessLimit,
+  MetaTokenError,
   publicToken,
   tokenFingerprint,
   graphPostWithToken,
@@ -31,7 +34,8 @@ const createSchema = z.object({
   mode: z.enum(['manual', 'semi_auto', 'auto']).default('manual'),
   name: z.string().trim().min(2).max(100),
   namePattern: z.string().trim().min(2).max(100).optional(),
-  count: z.number().int().min(1).max(20).default(1),
+  count: z.number().int().min(1).max(100).default(1),
+  stopOnLimit: z.boolean().default(false),
   primaryPage: z.union([z.string().regex(/^\d{5,30}$/), z.literal('')]).optional(),
   timezone: z.coerce.number().int().min(1).max(1000).default(140),
   vertical: z.enum(verticals).default('ADVERTISING'),
@@ -62,6 +66,13 @@ function generatedName(input: z.infer<typeof createSchema>, index: number) {
     .replaceAll('{name}', input.name)
     .replaceAll('{n}', String(index + 1))
     .replaceAll('{index}', String(index + 1));
+}
+
+function isBusinessLimitFailure(error: unknown) {
+  if (error instanceof MetaCreationError) {
+    return error.errors.some((item) => looksLikeBusinessLimit(item.message, item.metaSubcode));
+  }
+  return classifyMetaTokenError(error).status === 'create_restricted';
 }
 
 async function credentialContext(workspaceOwner: string, tokenId: string, forceRefresh = false) {
@@ -105,22 +116,48 @@ export async function GET(req: Request) {
     const tokenId = new URL(req.url).searchParams.get('tokenId') || '';
     if (!tokenId) return Response.json({ version: config().version, tokenSource: 'vault' });
     if (!z.string().uuid().safeParse(tokenId).success) return Response.json({ error: 'Token nguồn không hợp lệ.' }, { status: 400 });
-    const context = await credentialContext(workspaceOwner, tokenId, true);
+
+    // Preflight nhẹ: /me + quyền + Page qua Graph, song song cookie session nếu có.
+    // Không quét owned/client từng BM như Account Snapshot đầy đủ, nên trả lời nhanh
+    // và không tự gây rate limit khi tài khoản đã có nhiều BM.
+    const source = await getMetaTokenSecret(workspaceOwner, tokenId);
+    const uidHint = source.record.metaUserId || uidFromLabel(source.record.label);
+    let cookie = '';
+    try { cookie = await getSessionCookieByUid(workspaceOwner, uidHint); } catch { cookie = ''; }
+    const inspection = await inspectAccount({ token: source.token, cookie: cookie || undefined });
+
+    let record = source.record;
+    if (inspection.workingToken && inspection.workingToken !== source.token) {
+      record = await updateMetaToken(workspaceOwner, source.record, {
+        encrypted: await encryptToken(inspection.workingToken),
+        fingerprint: await tokenFingerprint(inspection.workingToken),
+        status: 'active',
+        metaUserId: inspection.me.id,
+        metaUserName: inspection.me.name,
+        lastCheckedAt: new Date().toISOString(),
+        lastError: undefined,
+        lastErrorCode: undefined,
+        lastErrorSubcode: undefined,
+      });
+      source.token = inspection.workingToken;
+    }
+
+    const confirmed = inspection.confirmedPermissions;
     return Response.json({
-      pages: context.snapshot.pages,
-      user: context.snapshot.actor,
-      confirmedPermissions: context.snapshot.confirmedPermissions,
-      inferredPermissions: context.snapshot.inferredPermissions,
+      pages: inspection.pages.map((page) => ({ id: page.id, name: page.name, tasks: page.tasks || [] })),
+      user: inspection.me,
+      confirmedPermissions: confirmed,
+      inferredPermissions: inspection.inferredPermissions,
       permissions: {
-        businessManagement: context.snapshot.confirmedPermissions.includes('business_management'),
-        pagesShowList: context.snapshot.confirmedPermissions.includes('pages_show_list'),
-        confirmed: context.snapshot.confirmedPermissions,
-        inferred: context.snapshot.inferredPermissions,
+        businessManagement: confirmed.includes('business_management'),
+        pagesShowList: confirmed.includes('pages_show_list'),
+        confirmed,
+        inferred: inspection.inferredPermissions,
       },
-      warnings: context.snapshot.warnings,
+      warnings: inspection.warnings,
       allowBlank: true,
-      snapshotAt: context.snapshot.capturedAt,
-      token: publicToken({ ...context.source.record, encrypted: context.source.record.encrypted }),
+      snapshotAt: new Date().toISOString(),
+      token: publicToken(record),
     });
   } catch (error) {
     return Response.json({ error: (error as Error).message }, { status: 400 });
@@ -136,6 +173,8 @@ export async function POST(req: Request) {
     const context = await credentialContext(workspaceOwner, input.tokenId, false);
     let currentRecord = context.source.record;
     const jobs = Array.from({ length: count }, (_, index) => ({ index, name: generatedName(input, index) }));
+    // Cookie session đọc đúng một lần cho cả batch: uid + fb_dtsg + token nhúng.
+    const preparedSession = await prepareCookieSession(context.cookie || undefined);
 
     const batch = await runIndependentBatch(jobs, async (job) => {
       if (job.index > 0 && input.delayMs) await sleep(input.delayMs);
@@ -143,6 +182,7 @@ export async function POST(req: Request) {
       const created = await createBusinessAccount({
         token: context.source.token,
         cookie: context.cookie || undefined,
+        session: preparedSession,
         name: job.name,
         vertical: input.vertical,
         timezoneId: input.timezone,
@@ -251,7 +291,12 @@ export async function POST(req: Request) {
         diagnostics.push(toStructuredMetaError(error, { source: 'app', stage: 'persist' }));
       }
       return { id: created.id, name: created.name, source: created.source, asset, diagnostics, invite };
-    }, { continueOnError: input.continueOnError, maxConsecutiveErrors: input.maxConsecutiveErrors });
+    }, {
+      continueOnError: input.continueOnError,
+      maxConsecutiveErrors: input.maxConsecutiveErrors,
+      // Chạm giới hạn tạo BM của Meta thì dừng nguyên batch ngay, không đốt thêm lượt gọi.
+      ...(input.stopOnLimit ? { stopOnError: isBusinessLimitFailure } : {}),
+    });
 
     const successes = batch.filter((result) => result.ok);
     const failures = batch.filter((result) => !result.ok).map((result) => {
@@ -261,24 +306,30 @@ export async function POST(req: Request) {
       return { index: result.index, name: result.item.name, errors };
     });
     const now = new Date().toISOString();
+    const failedErrors = failures.flatMap((item) => item.errors);
+    const limitReached = failedErrors.some((item) => looksLikeBusinessLimit(item.message, item.metaSubcode));
     const lastFailure = failures.at(-1)?.errors.at(-1);
-    const classified = lastFailure ? classifyMetaTokenError(new Error(lastFailure.message)) : null;
+    // Giữ nguyên metaCode/metaSubcode khi phân loại để nhận đúng subcode 1690114.
+    const classified = lastFailure
+      ? classifyMetaTokenError(new MetaTokenError(lastFailure.message, { code: lastFailure.metaCode, subcode: lastFailure.metaSubcode }))
+      : null;
     currentRecord = await updateMetaToken(workspaceOwner, currentRecord, {
-      status: failures.length && !successes.length && classified?.status === 'create_restricted' ? 'create_restricted' : 'active',
+      status: limitReached || (failures.length && !successes.length && classified?.status === 'create_restricted') ? 'create_restricted' : 'active',
       metaUserId: context.snapshot.actor.id,
       metaUserName: context.snapshot.actor.name,
       lastUsedAt: now,
       lastCreateAt: now,
-      lastCreateResult: `success:${successes.length};failed:${failures.length}`,
+      lastCreateResult: `success:${successes.length};failed:${failures.length}${limitReached ? ';limit' : ''}`,
       lastError: lastFailure?.message,
       lastErrorCode: lastFailure?.metaCode,
       lastErrorSubcode: lastFailure?.metaSubcode,
     });
-    await audit(workspaceOwner, `Tạo BM ${input.mode}: ${successes.length} thành công, ${failures.length} thất bại · token ${currentRecord.label}`).run();
+    await audit(workspaceOwner, `Tạo BM ${input.mode}: ${successes.length} thành công, ${failures.length} thất bại${limitReached ? ' (chạm giới hạn Meta)' : ''} · token ${currentRecord.label}`).run();
 
     const first = successes[0]?.ok ? successes[0].value : undefined;
     return Response.json({
       ok: failures.length === 0,
+      limitReached,
       id: first?.id,
       name: first?.name,
       saved: Boolean(first),
@@ -299,7 +350,9 @@ export async function POST(req: Request) {
       results: successes.map((result) => result.ok ? result.value : null).filter(Boolean),
       failures,
       tokenStatus: currentRecord.status,
-      message: `Đã xử lý ${batch.length} BM: ${successes.length} thành công, ${failures.length} thất bại.`,
+      message: limitReached
+        ? `Tạo được ${successes.length} BM rồi chạm giới hạn tạo Business của tài khoản này. Batch đã dừng đúng lúc, không retry thêm.`
+        : `Đã xử lý ${batch.length} BM: ${successes.length} thành công, ${failures.length} thất bại.`,
     }, { status: successes.length ? 200 : 400 });
   } catch (error) {
     if (error instanceof z.ZodError) return Response.json({ error: 'Cấu hình tạo BM không hợp lệ.' }, { status: 400 });

@@ -42,6 +42,23 @@ test('owned_pages + client_pages duplicate is deduplicated by Page ID', () => {
   assert.deepEqual(merged[0].sources.sort(), ['bm_client', 'bm_owned']);
 });
 
+test('deduplication keeps rich metadata and all owning business ids', () => {
+  const merged = mergeDiscoveredAssets([
+    {
+      id: '30001', name: 'Primary Ads', amountSpent: '1200', balance: '300', currency: 'USD',
+      businessIds: ['90001'], sources: ['graph_accounts' as const],
+    },
+    {
+      id: '30001', name: 'Ads 30001', amountSpent: undefined, balance: undefined,
+      businessIds: ['90002'], sources: ['bm_client' as const],
+    },
+  ]);
+  assert.equal(merged[0].name, 'Primary Ads');
+  assert.equal(merged[0].amountSpent, '1200');
+  assert.equal(merged[0].balance, '300');
+  assert.deepEqual(merged[0].businessIds.sort(), ['90001', '90002']);
+});
+
 test('Graph failure + live Session keeps account LIVE', () => {
   assert.deepEqual(resolveAccountAvailability(false, true), { live: true, source: 'cookie' });
 });
@@ -55,8 +72,22 @@ test('BM create Graph failure + Session failure retains both diagnostics', () =>
   assert.deepEqual(error.errors.map((item) => item.stage), ['graph_create', 'session_create']);
 });
 
-test('BM5 with 2 ad accounts preserves capacity and actual count separately', () => {
-  assert.deepEqual(bmClassification(5, 2), { bmType: 'BM5', accountCapacity: 5, adAccountCount: 2 });
+test('BM type uses only owned ad accounts, not capacity or total linked accounts', () => {
+  assert.deepEqual(bmClassification(50, 7, 2, 2), {
+    bmType: 'BM2',
+    accountCapacity: 50,
+    adAccountCount: 7,
+    ownedAdAccountCount: 2,
+  });
+});
+
+test('partial owned-account discovery is marked as a lower bound', () => {
+  assert.deepEqual(bmClassification(null, 7, null, 2), {
+    bmType: 'BM2+',
+    accountCapacity: null,
+    adAccountCount: 7,
+    ownedAdAccountCount: null,
+  });
 });
 
 test('three USD accounts aggregate to USD SINGLE', () => {

@@ -49,12 +49,29 @@ export function mergeDiscoveredAssets<T extends DiscoveredAsset>(rows: T[]) {
     }
     const currentName = text(current.name);
     const nextName = text(row.name);
+    const genericName = (value: string) => (
+      !value
+      || value === row.id
+      || new RegExp(`^(?:BM|Business|Ads|Ad account|Page|Pixel|Dataset)\\s+${row.id}$`, 'i').test(value)
+    );
+    const defined = Object.fromEntries(Object.entries(row).filter(([, value]) => {
+      if (value === undefined || value === null || value === '') return false;
+      if (Array.isArray(value) && value.length === 0) return false;
+      return true;
+    })) as Partial<T>;
+    const mergedArrays: Record<string, unknown[]> = {};
+    for (const key of ['businessIds', 'tasks']) {
+      const before = Array.isArray(current[key]) ? current[key] as unknown[] : [];
+      const after = Array.isArray(row[key]) ? row[key] as unknown[] : [];
+      if (before.length || after.length) mergedArrays[key] = [...new Set([...before, ...after])];
+    }
     map.set(row.id, {
       ...current,
-      ...row,
-      name: nextName && nextName !== row.id ? nextName : currentName || row.id,
+      ...defined,
+      ...mergedArrays,
+      name: !genericName(nextName) || genericName(currentName) ? nextName || currentName || row.id : currentName,
       sources: [...new Set([...current.sources, ...row.sources])],
-    });
+    } as T);
   }
   return [...map.values()];
 }
@@ -69,14 +86,24 @@ export function aggregateCurrencies(values: Array<string | null | undefined>) {
   };
 }
 
-export function bmClassification(accountCapacity: number | null | undefined, adAccountCount: number) {
+export function bmClassification(
+  accountCapacity: number | null | undefined,
+  adAccountCount: number,
+  ownedAdAccountCount: number | null | undefined,
+  observedOwnedAdAccountCount = 0,
+) {
   const capacity = Number.isInteger(accountCapacity) && Number(accountCapacity) >= 0
     ? Number(accountCapacity)
     : null;
+  const ownedCount = Number.isInteger(ownedAdAccountCount) && Number(ownedAdAccountCount) >= 0
+    ? Number(ownedAdAccountCount)
+    : null;
+  const observedOwned = Math.max(0, Number(observedOwnedAdAccountCount) || 0);
   return {
-    bmType: capacity === null ? 'UNKNOWN' : `BM${capacity}`,
+    bmType: ownedCount === null ? (observedOwned ? `BM${observedOwned}+` : 'UNKNOWN') : `BM${ownedCount}`,
     accountCapacity: capacity,
     adAccountCount: Math.max(0, Number(adAccountCount) || 0),
+    ownedAdAccountCount: ownedCount,
   };
 }
 
@@ -117,7 +144,7 @@ export function buildShopPayload(asset: Asset) {
 export async function runIndependentBatch<T, R>(
   items: T[],
   task: (item: T, index: number) => Promise<R>,
-  options: { continueOnError?: boolean; maxConsecutiveErrors?: number } = {},
+  options: { continueOnError?: boolean; maxConsecutiveErrors?: number; stopOnError?: (error: unknown) => boolean } = {},
 ) {
   const results: Array<{ index: number; item: T; ok: true; value: R } | { index: number; item: T; ok: false; error: unknown }> = [];
   const continueOnError = options.continueOnError !== false;
@@ -131,8 +158,25 @@ export async function runIndependentBatch<T, R>(
     } catch (error) {
       results.push({ index, item: items[index], ok: false, error });
       consecutiveErrors += 1;
+      if (options.stopOnError?.(error)) break;
       if (!continueOnError || consecutiveErrors >= maxConsecutiveErrors) break;
     }
   }
+  return results;
+}
+
+/** Run async workers over items with bounded concurrency, preserving input order. */
+export async function mapPool<T, R>(items: T[], limit: number, worker: (item: T, index: number) => Promise<R>) {
+  const results = new Array<R>(items.length);
+  if (!items.length) return results;
+  let cursor = 0;
+  const size = Math.max(1, Math.min(limit, items.length));
+  await Promise.all(Array.from({ length: size }, async () => {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      results[index] = await worker(items[index], index);
+    }
+  }));
   return results;
 }

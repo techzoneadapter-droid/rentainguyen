@@ -9,6 +9,7 @@ import {
   normalizeMetaCookie,
   type MetaSessionRecord,
 } from '../../../lib/credential-vault';
+import { mapPool } from '../../../lib/resource-model';
 import { audit, list, owner, put } from '../../../lib/server';
 
 type PublicMetaSession = Omit<MetaSessionRecord, 'encrypted'>;
@@ -68,9 +69,9 @@ export async function POST(req: Request) {
       const targets = input.ids?.length
         ? existing.filter((record) => input.ids?.includes(record.id))
         : existing.slice(0, 50);
-      const checked: PublicMetaSession[] = [];
       let live = 0;
-      for (const record of targets) {
+      // Mỗi session là một dòng dữ liệu riêng nên có thể check song song có giới hạn.
+      const checked = await mapPool(targets, 4, async (record) => {
         const cookie = await decryptCredential(record.encrypted);
         const now = new Date().toISOString();
         try {
@@ -88,7 +89,7 @@ export async function POST(req: Request) {
           };
           await put(workspaceOwner, 'meta-session', next).run();
           live += 1;
-          checked.push(publicSession(next));
+          return publicSession(next);
         } catch (error) {
           const next: MetaSessionRecord = {
             ...record,
@@ -98,9 +99,9 @@ export async function POST(req: Request) {
             updated: now,
           };
           await put(workspaceOwner, 'meta-session', next).run();
-          checked.push(publicSession(next));
+          return publicSession(next);
         }
-      }
+      });
       await audit(workspaceOwner, `Check session cookie: ${checked.length} phiên, LIVE ${live}`).run();
       return Response.json({
         processed: checked.length,

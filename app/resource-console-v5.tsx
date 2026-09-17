@@ -1,10 +1,11 @@
 'use client';
 
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   BadgeCheck,
   Building2,
   CheckCircle2,
+  ChevronLeft,
   ChevronRight,
   CreditCard,
   FileUp,
@@ -24,10 +25,17 @@ import {
   Zap,
 } from 'lucide-react';
 import type { Asset } from '../lib/data';
+import {
+  Pagination,
+  PaginationContent,
+  PaginationEllipsis,
+  PaginationItem,
+  PaginationLink,
+} from '../components/ui/pagination';
 import styles from './unified-meta-workspace.module.css';
 
 type Mode = 'home' | 'manage' | 'create';
-type ResourceTab = 'BM' | 'TKQC' | 'Page';
+type ResourceTab = 'BM' | 'TKQC' | 'Page' | 'Dataset/Pixel';
 type CreateTab = 'token' | 'bm' | 'crm' | 'shop';
 type TokenStatus = 'active' | 'invalid' | 'permission_issue' | 'rate_limited' | 'create_restricted' | 'unknown_error';
 type RunKind =
@@ -127,6 +135,7 @@ const RESOURCE_META: Record<ResourceTab, { label: string; icon: typeof Building2
   BM: { label: 'BM', icon: Building2 },
   TKQC: { label: 'ADS', icon: CreditCard },
   Page: { label: 'PAGE', icon: Flag },
+  'Dataset/Pixel': { label: 'PIXEL / DATASET', icon: Sparkles },
 };
 
 const ADS_TOOLS: ActionItem[] = [
@@ -189,8 +198,52 @@ const PAGE_TOOLS: ActionItem[] = [
   { id: 'share', title: 'Share Page', kind: 'unsupported' },
 ];
 
+const PIXEL_TOOLS: ActionItem[] = [
+  { id: 'check', title: 'Check Pixel / Dataset', kind: 'refresh' },
+  { id: 'open', title: 'Mở Business Settings', kind: 'open' },
+  { id: 'crm', title: 'Đẩy CRM', kind: 'crm' },
+];
+
 function metaId(asset: Asset) {
   return asset.metaId || asset.id.match(/meta:(\d{5,30})$/)?.[1] || asset.id.match(/(\d{5,30})$/)?.[1] || '';
+}
+
+function bmField(value: string | number | null | undefined, unknownValues: string[] = []) {
+  const normalized = String(value ?? '').trim();
+  return normalized && !unknownValues.includes(normalized.toLowerCase()) ? normalized : 'Chưa đọc được';
+}
+
+function bmCurrency(asset: Asset) {
+  if (asset.currencyMode === 'MULTI' && asset.currencies?.length) return 'MULTI';
+  if (asset.currency && asset.currency !== 'NONE' && asset.currency !== 'UNKNOWN') return asset.currency;
+  if (asset.adAccountCount === 0 && asset.bmDetailsStatus !== 'unavailable') return 'Không có TKQC';
+  return 'Chưa đọc được';
+}
+
+function bmResourceCount(exact: number | null | undefined, observed: number | undefined) {
+  if (exact !== undefined && exact !== null) return String(exact);
+  if (observed) return `Đã thấy ${observed}+`;
+  return 'Chưa đọc được';
+}
+
+function bmReadStatus(asset: Asset) {
+  if (asset.bmDetailsStatus === 'complete') return 'Đã đọc hồ sơ và tài nguyên liên kết';
+  if (asset.bmDetailsStatus === 'partial') return 'Đã đọc một phần từ Meta/session';
+  return 'Chưa đọc được hồ sơ chi tiết';
+}
+
+function bmTypeLabel(asset: Asset) {
+  return asset.bmType && asset.bmType !== 'UNKNOWN' ? asset.bmType : 'Chưa xác định owned/client';
+}
+
+function paginationItems(current: number, total: number): Array<number | 'start-ellipsis' | 'end-ellipsis'> {
+  if (total <= 7) return Array.from({ length: total }, (_, index) => index + 1);
+  const items: Array<number | 'start-ellipsis' | 'end-ellipsis'> = [1];
+  if (current > 3) items.push('start-ellipsis');
+  for (let page = Math.max(2, current - 1); page <= Math.min(total - 1, current + 1); page += 1) items.push(page);
+  if (current < total - 2) items.push('end-ellipsis');
+  items.push(total);
+  return items;
 }
 
 function cleanTokenCandidate(value: unknown) {
@@ -263,7 +316,8 @@ function statusClass(status: string) {
 function currentTools(tab: ResourceTab) {
   if (tab === 'BM') return BM_TOOLS;
   if (tab === 'TKQC') return ADS_TOOLS;
-  return PAGE_TOOLS;
+  if (tab === 'Page') return PAGE_TOOLS;
+  return PIXEL_TOOLS;
 }
 
 export default function ResourceConsoleV5() {
@@ -276,6 +330,8 @@ export default function ResourceConsoleV5() {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [selectedAssetId, setSelectedAssetId] = useState('');
   const [query, setQuery] = useState('');
+  const [resourcePage, setResourcePage] = useState(1);
+  const [resourcePageSize, setResourcePageSize] = useState(8);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState('');
   const [message, setMessage] = useState('');
@@ -291,6 +347,7 @@ export default function ResourceConsoleV5() {
   const [bmReady, setBmReady] = useState(false);
   const [bmMode, setBmMode] = useState<'manual'|'semi_auto'|'auto'>('manual');
   const [bmCount, setBmCount] = useState(1);
+  const [bmUntilLimit, setBmUntilLimit] = useState(false);
   const [bmNamePattern, setBmNamePattern] = useState('{name} {n}');
   const [bmDelayMs, setBmDelayMs] = useState(1000);
   const [bmContinueOnError, setBmContinueOnError] = useState(false);
@@ -321,10 +378,24 @@ export default function ResourceConsoleV5() {
       return `${asset.name} ${metaId(asset)} ${asset.status} ${asset.verificationStatus || ''}`.toLowerCase().includes(needle);
     });
   }, [assets, query, resourceTab, selectedToken, linkFilter, shopFilter]);
+  const resourcePageCount = Math.max(1, Math.ceil(filteredAssets.length / resourcePageSize));
+  const safeResourcePage = Math.min(resourcePage, resourcePageCount);
+  const pagedAssets = useMemo(() => {
+    const start = (safeResourcePage - 1) * resourcePageSize;
+    return filteredAssets.slice(start, start + resourcePageSize);
+  }, [filteredAssets, resourcePageSize, safeResourcePage]);
+  const visibleResourcePages = useMemo(
+    () => paginationItems(safeResourcePage, resourcePageCount),
+    [safeResourcePage, resourcePageCount],
+  );
+  useEffect(() => {
+    setResourcePage(1);
+  }, [query, resourceTab, selectedToken, linkFilter, shopFilter, resourcePageSize]);
   const stats = useMemo(() => ({
     BM: assets.filter((asset) => asset.type === 'BM').length,
     TKQC: assets.filter((asset) => asset.type === 'TKQC').length,
     Page: assets.filter((asset) => asset.type === 'Page').length,
+    'Dataset/Pixel': assets.filter((asset) => asset.type === 'Dataset/Pixel').length,
   }), [assets]);
 
   async function jsonFetch<T>(url: string, init?: RequestInit) {
@@ -548,7 +619,7 @@ export default function ResourceConsoleV5() {
   }
 
   async function runResourceAction(kind: RunKind, title: string) {
-    const bulkIds = selectedIds.length ? selectedIds : filteredAssets.slice(0, 100).map((asset) => asset.id);
+    const bulkIds = selectedIds.length ? selectedIds : pagedAssets.map((asset) => asset.id);
     if (kind === 'health') return health(bulkIds);
     if (kind === 'sync') return selectedToken ? syncToken(selectedToken).then(loadAssets) : setError('Chọn token trước.');
     if (kind === 'crm') return pushCrm(selectedAsset ? [selectedAsset.id] : bulkIds);
@@ -598,23 +669,25 @@ export default function ResourceConsoleV5() {
     if (!bmName.trim()) { setError('Nhập tên BM.'); return; }
     setBusy(true); setError('');
     try {
-      const data = await jsonFetch<{ message?: string; summary?: {total:number;success:number;failed:number}; failures?: Array<{name:string;errors:Array<{stage:string;source:string;message:string}>}> }>('/api/business-manager', {
+      const data = await jsonFetch<{ message?: string; limitReached?: boolean; summary?: {total:number;success:number;failed:number}; failures?: Array<{name:string;errors:Array<{stage:string;source:string;message:string}>}> }>('/api/business-manager', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           tokenId: selectedToken, mode: bmMode, name: bmName, namePattern: bmNamePattern,
-          count: bmMode === 'manual' ? 1 : bmCount, primaryPage: bmPage || '', timezone: Number(bmTimezone) || 140,
-          vertical: bmVertical, adminEmail: '', delayMs: bmDelayMs, continueOnError: bmContinueOnError,
+          count: bmMode === 'manual' ? 1 : bmCount, stopOnLimit: bmUntilLimit,
+          primaryPage: bmPage || '', timezone: Number(bmTimezone) || 140,
+          vertical: bmVertical, adminEmail: '', delayMs: bmDelayMs, continueOnError: bmContinueOnError || bmUntilLimit,
           maxConsecutiveErrors: bmMaxErrors, autoCheckProfile: bmAutoCheck, autoSync: bmAutoSync,
           autoGenerateAccessLink: bmAutoLink, autoPushShop: bmAutoShop, purposeConfirmed: true,
         }),
       });
-      setMessage(data.message || 'Đã tạo BM.'); setBmName('');
+      setMessage(`${data.limitReached ? '⛔ ' : ''}${data.message || 'Đã tạo BM.'}${data.limitReached && data.summary ? ` Tổng kết: ${data.summary.success} BM thành công trước khi chạm giới hạn.` : ''}`);
+      setBmName('');
       if (data.failures?.length) setError(data.failures.flatMap((item)=>item.errors.map((failure)=>`${item.name} · ${failure.stage}/${failure.source}: ${failure.message}`)).join('\n'));
       await loadAll();
     } catch (err) {
-      const detailed = err as Error & {details?: {errors?: Array<{stage:string;source:string;message:string}>;failures?: Array<{name:string;errors:Array<{stage:string;source:string;message:string}>}>}};
+      const detailed = err as Error & {details?: {errors?: Array<{stage:string;source:string;message:string}>;failures?: Array<{name:string;errors:Array<{stage:string;source:string;message:string}>}>; limitReached?: boolean}};
       const rows = detailed.details?.errors || detailed.details?.failures?.flatMap((item)=>item.errors.map((failure)=>({...failure,message:`${item.name}: ${failure.message}`}))) || [];
-      setError(rows.length ? rows.map((item)=>`${item.stage}/${item.source}: ${item.message}`).join('\n') : detailed.message);
+      setError((detailed.details?.limitReached ? '⛔ Chạm giới hạn tạo BM của Meta. ' : '') + (rows.length ? rows.map((item)=>`${item.stage}/${item.source}: ${item.message}`).join('\n') : detailed.message));
     }
     finally { setBusy(false); }
   }
@@ -699,10 +772,10 @@ export default function ResourceConsoleV5() {
   }
 
   function renderToolPanel() {
-    const bulkIds = selectedIds.length ? selectedIds : filteredAssets.slice(0, 100).map((asset) => asset.id);
+    const bulkIds = selectedIds.length ? selectedIds : pagedAssets.map((asset) => asset.id);
     return <aside style={{ background:'#fff', border:'1px solid #e0e6ef', borderRadius:14, minHeight:520, maxHeight:'calc(100vh - 178px)', overflow:'auto', padding:14 }}>
       <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:12 }}>
-        <div><strong>Bảng công cụ {RESOURCE_META[resourceTab].label}</strong><div style={{ fontSize:10, color:'#8b94a6' }}>{selectedAsset ? selectedAsset.name : `${bulkIds.length} tài nguyên đang lọc`}</div></div><Settings2 size={16}/>
+        <div><strong>Bảng công cụ {RESOURCE_META[resourceTab].label}</strong><div style={{ fontSize:10, color:'#8b94a6' }}>{selectedAsset ? selectedAsset.name : `${bulkIds.length} tài nguyên trên trang này`}</div></div><Settings2 size={16}/>
       </div>
       <div style={{ display:'grid', gap:8 }}>
         {currentTools(resourceTab).map((tool) => (
@@ -718,9 +791,43 @@ export default function ResourceConsoleV5() {
     </aside>;
   }
 
+  function resourceDetails(asset: Asset) {
+    const business = asset.businessName || assets.find((item) => item.id === asset.parent)?.name || '—';
+    const itemStyle = { display: 'inline-flex', gap: 4, marginRight: 10, whiteSpace: 'nowrap' as const };
+    if (asset.type === 'TKQC') {
+      return <div style={{ fontSize: 10, lineHeight: 1.7, minWidth: 420 }}>
+        <span style={itemStyle}>Tiền tệ: <b>{asset.currency || '—'}</b></span>
+        <span style={itemStyle}>Đã chi: <b>{asset.amountSpent || '—'}</b></span>
+        <span style={itemStyle}>Số dư: <b>{asset.balance || '—'}</b></span>
+        <span style={itemStyle}>Limit: <b>{asset.spendCap || asset.limit || '—'}</b></span><br/>
+        <span style={itemStyle}>Thanh toán: <b>{asset.billingType === 'PREPAID' ? 'Trả trước' : asset.billingType === 'POSTPAID' ? 'Trả sau' : 'Chưa rõ'}</b></span>
+        <span style={itemStyle}>Funding: <b>{asset.hasFundingSource ? asset.fundingDisplay || asset.fundingType || 'Có' : asset.hasFundingSource === false ? 'Chưa có' : 'Chưa đọc được'}</b></span>
+        <span style={itemStyle}>Timezone: <b>{asset.timezoneName || asset.timezoneId || '—'}</b></span>
+        <span style={itemStyle}>BM: <b>{business}</b></span><br/>
+        <span style={itemStyle}>Quan hệ: <b>{asset.ownership === 'owned' ? 'BM sở hữu' : asset.ownership === 'client' ? 'Đối tác/client' : 'Chưa xác định'}</b></span>
+        <span style={itemStyle}>Owner ID: <b>{asset.ownerId || '—'}</b></span>
+        <span style={itemStyle}>Quốc gia: <b>{bmField(asset.country, ['unknown', 'chưa rõ'])}</b></span>
+      </div>;
+    }
+    if (asset.type === 'Page') {
+      return <div style={{ fontSize: 10, lineHeight: 1.7, minWidth: 300 }}>
+        <span style={itemStyle}>Danh mục: <b>{asset.category || '—'}</b></span>
+        <span style={itemStyle}>Followers: <b>{asset.followersCount ?? '—'}</b></span>
+        <span style={itemStyle}>Fans: <b>{asset.fanCount ?? '—'}</b></span><br/>
+        <span style={itemStyle}>Verify: <b>{asset.verificationStatus || '—'}</b></span>
+        <span style={itemStyle}>BM: <b>{business}</b></span>
+      </div>;
+    }
+    return <div style={{ fontSize: 10, lineHeight: 1.7, minWidth: 280 }}>
+      <span style={itemStyle}>BM: <b>{business}</b></span>
+      <span style={itemStyle}>Tạo: <b>{asset.creationTime || '—'}</b></span><br/>
+      <span style={itemStyle}>Bắn gần nhất: <b>{asset.lastFiredTime || '—'}</b></span>
+    </div>;
+  }
+
   function renderManage() {
     const meta = RESOURCE_META[resourceTab]; const Icon = meta.icon;
-    return <div className={styles.workspace}><aside className={styles.sidebar}><div className={styles.sideTitle}><ShieldCheck size={18}/><div><strong>QUẢN LÝ TÀI NGUYÊN</strong><small>BM · ADS · PAGE</small></div></div>{(Object.keys(RESOURCE_META) as ResourceTab[]).map((tab) => { const M = RESOURCE_META[tab]; const I = M.icon; return <button key={tab} className={resourceTab===tab?styles.sideActive:''} onClick={() => { setResourceTab(tab); setSelectedIds([]); setSelectedAssetId(''); setBilling(null); setCampaigns([]); setPagePosts([]); }}><span><I size={15}/></span><strong>{M.label}</strong><em>{stats[tab]}</em><ChevronRight size={13}/></button>; })}<div className={styles.sideNote}>BM dùng snapshot chung với Token Center. Access link và Shop là hai trạng thái độc lập.</div></aside><main className={styles.content}><div className={styles.pageHead}><div><div className={styles.kicker}>RESOURCE MANAGER</div><h2>{meta.label}</h2><p>Số lượng tài nguyên lấy từ cùng Account Snapshot đã check.</p></div><div className={styles.actions}><button className={styles.secondary} onClick={()=>void loadAll()}><RefreshCw size={14}/> Làm mới</button><button onClick={()=>selectedToken&&void syncToken(selectedToken).then(loadAssets)} disabled={!selectedToken||busy}><RefreshCw size={14}/> Đồng bộ token</button></div></div>{alerts()}<div className={styles.toolbar}><div className={styles.search}><Search size={14}/><input value={query} onChange={(e)=>setQuery(e.target.value)} placeholder={`Tìm ${meta.label}...`}/></div><select value={selectedToken} onChange={(e)=>setSelectedToken(e.target.value)}><option value="">Tất cả token</option>{tokens.map((token)=><option key={token.id} value={token.id}>{token.label} · {STATUS_TEXT[token.status]}</option>)}</select>{resourceTab==='BM'&&<><select value={linkFilter} onChange={(e)=>setLinkFilter(e.target.value)}><option value="ALL">Tất cả link</option><option value="none">Chưa sinh link</option><option value="ready">Link ready</option><option value="failed">Link failed</option></select><select value={shopFilter} onChange={(e)=>setShopFilter(e.target.value)}><option value="ALL">Tất cả Shop</option><option value="not_ready">Chưa đẩy Shop</option><option value="pushed">Đã đẩy Shop</option><option value="failed">Shop failed</option></select><button className={styles.ghost} onClick={()=>void generateAccessLinks(selectedIds.length?selectedIds:filteredAssets.map((a)=>a.id))} disabled={busy}>Sinh Link BM</button><button className={styles.ghost} onClick={()=>void pushShop(selectedIds.length?selectedIds:filteredAssets.map((a)=>a.id))} disabled={busy}><Send size={13}/> Shop</button></>}<button className={styles.ghost} onClick={()=>void health(selectedIds.length?selectedIds:filteredAssets.slice(0,100).map((a)=>a.id))} disabled={busy}>Check all</button></div><div style={{ display:'grid', gridTemplateColumns:'minmax(0,1fr) 330px', gap:12 }}><div className={styles.tableCard} style={{overflowX:'auto'}}><table><thead><tr>{resourceTab==='BM'?<><th></th><th>Tên BM</th><th>Business ID</th><th>Loại BM</th><th>Capacity</th><th>TKQC đã có</th><th>Tiền tệ</th><th>Verify</th><th>Quốc gia</th><th>Link truy cập</th><th>Shop status</th><th>Check gần nhất</th></>:<><th></th><th>Tên</th><th>ID</th><th>Trạng thái</th><th>Chi tiết</th><th>Check gần nhất</th></>}</tr></thead><tbody>{filteredAssets.map((asset)=><tr key={asset.id} onClick={()=>setSelectedAssetId(asset.id)} style={{ cursor:'pointer', background:selectedAssetId===asset.id?'#f4f7ff':undefined }}><td><input type="checkbox" checked={selectedIds.includes(asset.id)} onClick={(e)=>e.stopPropagation()} onChange={(e)=>setSelectedIds((prev)=>e.target.checked?[...prev,asset.id]:prev.filter((id)=>id!==asset.id))}/></td>{resourceTab==='BM'?<><td><strong>{asset.name}</strong><small>{tokens.find((t)=>t.id===asset.sourceTokenId)?.label || ''}</small></td><td>{metaId(asset)}</td><td>{asset.bmType||'UNKNOWN'}</td><td>{asset.accountCapacity??'unknown'}</td><td>{asset.adAccountCount??0}</td><td>{asset.currencyMode==='MULTI'?'MULTI':asset.currency||'NONE'}{asset.currencies?.length?<small>{asset.currencies.join(', ')}</small>:null}</td><td><span className={statusClass(asset.status)}>{asset.verificationStatus||asset.status}</span></td><td>{asset.country||'—'}</td><td>{asset.accessLinkStatus==='ready'&&asset.accessLink?<div style={{display:'flex',gap:4}}><button className={styles.ghost} onClick={(e)=>{e.stopPropagation();window.open(asset.accessLink,'_blank','noopener,noreferrer')}} style={{color:'#14853d'}}>🟢 Mở Link</button><button className={styles.ghost} onClick={(e)=>{e.stopPropagation();void navigator.clipboard.writeText(asset.accessLink||'')}}>Copy</button></div>:asset.accessLinkStatus==='failed'?<button className={styles.ghost} title={asset.accessLinkError||''} style={{color:'#b42318'}}>🔴 Sinh lỗi</button>:<span>⚪ Chưa sinh</span>}</td><td title={asset.shopError||''}>{asset.shopStatus||'not_ready'}</td><td>{asset.checked?new Date(asset.checked).toLocaleString('vi-VN'):'—'}</td></>:<><td><strong>{asset.name}</strong><small>{tokens.find((t)=>t.id===asset.sourceTokenId)?.label || ''}</small></td><td>{metaId(asset)}</td><td><span className={statusClass(asset.status)}>{asset.status}</span></td><td>{asset.type==='TKQC'?`${asset.currency||''} ${asset.limit||''}`:asset.healthNote||'—'}</td><td>{asset.checked?new Date(asset.checked).toLocaleString('vi-VN'):'—'}</td></>}</tr>)}</tbody></table>{!filteredAssets.length&&<div className={styles.empty}><Icon size={22}/><strong>Chưa có {meta.label}</strong><span>Nạp/check token rồi đồng bộ tài nguyên.</span></div>}</div>{renderToolPanel()}</div></main></div>;
+    return <div className={styles.workspace}><aside className={styles.sidebar}><div className={styles.sideTitle}><ShieldCheck size={18}/><div><strong>QUẢN LÝ TÀI NGUYÊN</strong><small>BM · ADS · PAGE · PIXEL</small></div></div>{(Object.keys(RESOURCE_META) as ResourceTab[]).map((tab) => { const M = RESOURCE_META[tab]; const I = M.icon; return <button key={tab} className={resourceTab===tab?styles.sideActive:''} onClick={() => { setResourceTab(tab); setSelectedIds([]); setSelectedAssetId(''); setBilling(null); setCampaigns([]); setPagePosts([]); }}><span><I size={15}/></span><strong>{M.label}</strong><em>{stats[tab]}</em><ChevronRight size={13}/></button>; })}<div className={styles.sideNote}>BM dùng snapshot chung với Token Center. Access link và Shop là hai trạng thái độc lập.</div></aside><main className={styles.content}><div className={styles.pageHead}><div><div className={styles.kicker}>RESOURCE MANAGER</div><h2>{meta.label}</h2><p>Số lượng tài nguyên lấy từ cùng Account Snapshot đã check. Các số tiền hiển thị theo đơn vị thô Meta API.</p></div><div className={styles.actions}><button className={styles.secondary} onClick={()=>void loadAll()}><RefreshCw size={14}/> Làm mới</button><button onClick={()=>selectedToken&&void syncToken(selectedToken).then(loadAssets)} disabled={!selectedToken||busy}><RefreshCw size={14}/> Đồng bộ token</button></div></div>{alerts()}<div className={styles.toolbar}><div className={styles.search}><Search size={14}/><input value={query} onChange={(e)=>setQuery(e.target.value)} placeholder={`Tìm ${meta.label}...`}/></div><select value={selectedToken} onChange={(e)=>setSelectedToken(e.target.value)}><option value="">Tất cả token</option>{tokens.map((token)=><option key={token.id} value={token.id}>{token.label} · {STATUS_TEXT[token.status]}</option>)}</select>{resourceTab==='BM'&&<><select value={linkFilter} onChange={(e)=>setLinkFilter(e.target.value)}><option value="ALL">Tất cả link</option><option value="none">Chưa sinh link</option><option value="ready">Link ready</option><option value="failed">Link failed</option></select><select value={shopFilter} onChange={(e)=>setShopFilter(e.target.value)}><option value="ALL">Tất cả Shop</option><option value="not_ready">Chưa đẩy Shop</option><option value="pushed">Đã đẩy Shop</option><option value="failed">Shop failed</option></select><button className={styles.ghost} onClick={()=>void generateAccessLinks(selectedIds.length?selectedIds:filteredAssets.map((a)=>a.id))} disabled={busy}>Sinh Link BM</button><button className={styles.ghost} onClick={()=>void pushShop(selectedIds.length?selectedIds:filteredAssets.map((a)=>a.id))} disabled={busy}><Send size={13}/> Shop</button></>}<button className={styles.ghost} onClick={()=>void health(selectedIds.length?selectedIds:pagedAssets.map((a)=>a.id))} disabled={busy}>Check all</button></div><div style={{ display:'grid', gridTemplateColumns:'minmax(0,1fr) 330px', gap:12 }}><div className={styles.tableCard} style={{overflowX:'auto'}}><table><thead><tr>{resourceTab==='BM'?<><th></th><th>Tên BM</th><th>Business ID</th><th>Loại BM</th><th>TKQC owned</th><th>TKQC đã có</th><th>Page</th><th>Tiền tệ</th><th>Verify</th><th>IP / Quốc gia tạo</th><th>Link truy cập</th><th>Shop status</th><th>Check gần nhất</th></>:<><th></th><th>Tên</th><th>ID</th><th>Trạng thái</th><th>Thông tin Meta</th><th>Check gần nhất</th></>}</tr></thead><tbody>{pagedAssets.map((asset)=><tr key={asset.id} onClick={()=>setSelectedAssetId(asset.id)} style={{ cursor:'pointer', background:selectedAssetId===asset.id?'#f4f7ff':undefined }}><td><input type="checkbox" checked={selectedIds.includes(asset.id)} onClick={(e)=>e.stopPropagation()} onChange={(e)=>setSelectedIds((prev)=>e.target.checked?[...prev,asset.id]:prev.filter((id)=>id!==asset.id))}/></td>{resourceTab==='BM'?<><td><strong>{asset.name}</strong><small>{tokens.find((t)=>t.id===asset.sourceTokenId)?.label || ''}</small><small>{[asset.vertical, asset.timezoneId && `TZ ${asset.timezoneId}`].filter(Boolean).join(' · ')}</small><small>{bmReadStatus(asset)}</small></td><td>{metaId(asset)}</td><td>{bmTypeLabel(asset)}</td><td>{bmResourceCount(asset.ownedAdAccountCount, asset.observedOwnedAdAccountCount)}</td><td>{bmResourceCount(asset.adAccountCount, asset.observedAdAccountCount)}</td><td>{bmResourceCount(asset.pageCount, asset.observedPageCount)}</td><td>{bmCurrency(asset)}{asset.currencies?.length?<small>{asset.currencies.join(', ')}</small>:null}</td><td><span className={statusClass(asset.status)}>{bmField(asset.verificationStatus, ['unknown'])}</span></td><td>{bmField(asset.country, ['unknown', 'chưa rõ'])}</td><td>{asset.accessLinkStatus==='ready'&&asset.accessLink?<div style={{display:'flex',gap:4}}><button className={styles.ghost} onClick={(e)=>{e.stopPropagation();window.open(asset.accessLink,'_blank','noopener,noreferrer')}} style={{color:'#14853d'}}>🟢 Mở Link</button><button className={styles.ghost} onClick={(e)=>{e.stopPropagation();void navigator.clipboard.writeText(asset.accessLink||'')}}>Copy</button></div>:asset.accessLinkStatus==='failed'?<button className={styles.ghost} title={asset.accessLinkError||''} style={{color:'#b42318'}}>🔴 Sinh lỗi</button>:<span>⚪ Chưa sinh</span>}</td><td title={asset.shopError||''}>{asset.shopStatus||'not_ready'}</td><td>{asset.checked?new Date(asset.checked).toLocaleString('vi-VN'):'—'}</td></>:<><td><strong>{asset.name}</strong><small>{tokens.find((t)=>t.id===asset.sourceTokenId)?.label || ''}</small></td><td>{metaId(asset)}</td><td><span className={statusClass(asset.status)}>{asset.status}</span></td><td>{resourceDetails(asset)}</td><td>{asset.checked?new Date(asset.checked).toLocaleString('vi-VN'):'—'}</td></>}</tr>)}</tbody></table>{filteredAssets.length?<div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:12,padding:'12px 14px',borderTop:'1px solid #edf1f5',background:'#fff',position:'sticky',left:0}}><span style={{fontSize:11,color:'#6b7488'}}>Hiển thị {(safeResourcePage-1)*resourcePageSize+1}–{Math.min(safeResourcePage*resourcePageSize,filteredAssets.length)} / {filteredAssets.length}</span><div style={{display:'flex',alignItems:'center',gap:10}}><label style={{display:'flex',alignItems:'center',gap:6,fontSize:11,color:'#6b7488'}}>Mỗi trang <select value={resourcePageSize} onChange={(e)=>setResourcePageSize(Number(e.target.value))} style={{height:32,border:'1px solid #dfe5ef',borderRadius:8,padding:'0 8px',background:'#fff'}}><option value={8}>8</option><option value={15}>15</option><option value={30}>30</option></select></label><Pagination style={{width:'auto',margin:0}}><PaginationContent><PaginationItem><PaginationLink href="#" size="default" aria-label="Trang trước" aria-disabled={safeResourcePage===1} style={{pointerEvents:safeResourcePage===1?'none':undefined,opacity:safeResourcePage===1?.45:1,gap:4}} onClick={(e)=>{e.preventDefault();setResourcePage(Math.max(1,safeResourcePage-1));}}><ChevronLeft size={14}/> Trước</PaginationLink></PaginationItem>{visibleResourcePages.map((item)=>typeof item==='number'?<PaginationItem key={item}><PaginationLink href="#" isActive={item===safeResourcePage} aria-label={`Trang ${item}`} onClick={(e)=>{e.preventDefault();setResourcePage(item);}}>{item}</PaginationLink></PaginationItem>:<PaginationItem key={item}><PaginationEllipsis/></PaginationItem>)}<PaginationItem><PaginationLink href="#" size="default" aria-label="Trang sau" aria-disabled={safeResourcePage===resourcePageCount} style={{pointerEvents:safeResourcePage===resourcePageCount?'none':undefined,opacity:safeResourcePage===resourcePageCount?.45:1,gap:4}} onClick={(e)=>{e.preventDefault();setResourcePage(Math.min(resourcePageCount,safeResourcePage+1));}}>Sau <ChevronRight size={14}/></PaginationLink></PaginationItem></PaginationContent></Pagination></div></div>:null}{!filteredAssets.length&&<div className={styles.empty}><Icon size={22}/><strong>Chưa có {meta.label}</strong><span>Nạp/check token rồi đồng bộ tài nguyên.</span></div>}</div>{renderToolPanel()}</div></main></div>;
   }
 
   function renderTokenTab() {
@@ -735,9 +842,10 @@ export default function ResourceConsoleV5() {
       <div className={styles.formGrid}><label>Chế độ<select value={bmMode} onChange={(e)=>setBmMode(e.target.value as typeof bmMode)}><option value="manual">Manual</option><option value="semi_auto">Semi-auto</option><option value="auto">Auto</option></select></label><label>Nguồn (token/cookie LIVE)<select value={selectedToken} onChange={(e)=>{setSelectedToken(e.target.value);setBmReady(false);setBmPages([]);}}><option value="">Chọn nguồn LIVE</option>{liveTokens.map((t)=><option key={t.id} value={t.id}>{t.label}</option>)}</select></label></div>
       <div className={styles.permissionStrip}><span className={current?.status==='active'?styles.statusLive:styles.statusWarn}>{current?STATUS_TEXT[current.status]:'Chưa chọn'}</span>{confirmed.map((p)=><span key={`c-${p}`}>✓ Graph: {p}</span>)}{inferred.map((p)=><span key={`i-${p}`}>~ Session: {p}</span>)}</div>
       <button onClick={()=>void prepareBm()} disabled={busy||!selectedToken}><RefreshCw size={14}/> Chuẩn bị Account Snapshot</button>
-      {bmReady&&<><div className={styles.formGrid}><label>Tên BM<input value={bmName} onChange={(e)=>setBmName(e.target.value)} placeholder="Tên Business"/></label>{bmMode!=='manual'&&<label>Mẫu tên<input value={bmNamePattern} onChange={(e)=>setBmNamePattern(e.target.value)} placeholder="{name} {n}"/></label>}<label>Page / BM trắng<select value={bmPage} onChange={(e)=>setBmPage(e.target.value)}><option value="">BM trắng — không Page</option>{bmPages.map((p)=><option key={p.id} value={p.id}>{p.name} · {p.id}</option>)}</select></label><label>Timezone ID<input value={bmTimezone} onChange={(e)=>setBmTimezone(e.target.value)}/></label><label>Vertical<select value={bmVertical} onChange={(e)=>setBmVertical(e.target.value)}><option>ADVERTISING</option><option>ECOMMERCE</option><option>MARKETING</option><option>TECHNOLOGY</option><option>OTHER</option></select></label>{bmMode!=='manual'&&<><label>Số lượng<input type="number" min={1} max={20} value={bmCount} onChange={(e)=>setBmCount(Number(e.target.value)||1)}/></label><label>Delay (ms)<input type="number" min={0} max={30000} value={bmDelayMs} onChange={(e)=>setBmDelayMs(Number(e.target.value)||0)}/></label><label>Lỗi liên tiếp tối đa<input type="number" min={1} max={10} value={bmMaxErrors} onChange={(e)=>setBmMaxErrors(Number(e.target.value)||1)}/></label></>}</div>
-      {bmMode!=='manual'&&<div className={styles.permissionStrip}><label><input type="checkbox" checked={bmContinueOnError} onChange={(e)=>setBmContinueOnError(e.target.checked)}/> Bỏ qua lỗi</label><label><input type="checkbox" checked={bmAutoCheck} onChange={(e)=>setBmAutoCheck(e.target.checked)}/> Auto check</label><label><input type="checkbox" checked={bmAutoSync} onChange={(e)=>setBmAutoSync(e.target.checked)}/> Auto sync</label><label><input type="checkbox" checked={bmAutoLink} onChange={(e)=>setBmAutoLink(e.target.checked)}/> Auto sinh Link BM</label><label><input type="checkbox" checked={bmAutoShop} onChange={(e)=>{setBmAutoShop(e.target.checked);if(e.target.checked)setBmAutoLink(true);}}/> Auto đẩy Shop</label></div>}
-      <button onClick={()=>void createBm()} disabled={busy||!bmName}><Plus size={14}/> {bmMode==='manual'?'Tạo 1 BM':`Chạy ${bmMode==='auto'?'Auto':'Semi-auto'} (${bmCount})`}</button></>}</div></>;
+      {bmReady&&<><div className={styles.formGrid}><label>Tên BM<input value={bmName} onChange={(e)=>setBmName(e.target.value)} placeholder="Tên Business"/></label>{bmMode!=='manual'&&<label>Mẫu tên<input value={bmNamePattern} onChange={(e)=>setBmNamePattern(e.target.value)} placeholder="{name} {n}"/></label>}<label>Page / BM trắng<select value={bmPage} onChange={(e)=>setBmPage(e.target.value)}><option value="">BM trắng — không Page</option>{bmPages.map((p)=><option key={p.id} value={p.id}>{p.name} · {p.id}</option>)}</select></label><label>Timezone ID<input value={bmTimezone} onChange={(e)=>setBmTimezone(e.target.value)}/></label><label>Vertical<select value={bmVertical} onChange={(e)=>setBmVertical(e.target.value)}><option>ADVERTISING</option><option>ECOMMERCE</option><option>MARKETING</option><option>TECHNOLOGY</option><option>OTHER</option></select></label>{bmMode!=='manual'&&<><label>Số lượng<input type="number" min={1} max={bmUntilLimit?100:20} value={bmCount} onChange={(e)=>setBmCount(Number(e.target.value)||1)}/></label><label>Delay (ms)<input type="number" min={0} max={30000} value={bmDelayMs} onChange={(e)=>setBmDelayMs(Number(e.target.value)||0)}/></label><label>Lỗi liên tiếp tối đa<input type="number" min={1} max={10} value={bmMaxErrors} onChange={(e)=>setBmMaxErrors(Number(e.target.value)||1)}/></label></>}</div>
+      {bmMode!=='manual'&&<div className={styles.permissionStrip}><label><input type="checkbox" checked={bmContinueOnError} onChange={(e)=>setBmContinueOnError(e.target.checked)}/> Bỏ qua lỗi</label><label><input type="checkbox" checked={bmUntilLimit} onChange={(e)=>{setBmUntilLimit(e.target.checked);if(e.target.checked&&bmCount<100)setBmCount(100);}}/> Tạo tới khi chạm giới hạn</label><label><input type="checkbox" checked={bmAutoCheck} onChange={(e)=>setBmAutoCheck(e.target.checked)}/> Auto check</label><label><input type="checkbox" checked={bmAutoSync} onChange={(e)=>setBmAutoSync(e.target.checked)}/> Auto sync</label><label><input type="checkbox" checked={bmAutoLink} onChange={(e)=>setBmAutoLink(e.target.checked)}/> Auto sinh Link BM</label><label><input type="checkbox" checked={bmAutoShop} onChange={(e)=>{setBmAutoShop(e.target.checked);if(e.target.checked)setBmAutoLink(true);}}/> Auto đẩy Shop</label></div>}
+      {bmUntilLimit&&bmMode!=='manual'&&<small style={{display:'block',marginTop:6,color:'#475569'}}>Sẽ tạo liên tiếp cho tới khi Meta báo đã đạt giới hạn tạo Business (subcode 1690114), khi đó batch dừng và token được đánh dấu “Giới hạn tạo”.</small>}
+      <button onClick={()=>void createBm()} disabled={busy||!bmName}><Plus size={14}/> {bmMode==='manual'?'Tạo 1 BM':bmUntilLimit?`Chạy tới giới hạn (tối đa ${bmCount})`:`Chạy ${bmMode==='auto'?'Auto':'Semi-auto'} (${bmCount})`}</button></>}</div></>;
   }
 
   function renderCrm() {

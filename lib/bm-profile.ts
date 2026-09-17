@@ -17,6 +17,7 @@ export type BmProfile = {
   createdById: string;
   createdByName: string;
   adAccountCount: number;
+  ownedAdAccountCount: number | null;
   pageCount: number;
   userCount: number;
   shareLimit: string;
@@ -26,13 +27,6 @@ export type BmProfile = {
   currencies: string[];
   currencyMode: 'SINGLE' | 'MULTI' | 'NONE';
   currency: string;
-};
-
-const TIMEZONE_COUNTRY: Record<string, string> = {
-  '1': 'US', '2': 'US', '4': 'US', '5': 'US', '6': 'US', '7': 'US', '8': 'US', '9': 'US', '10': 'US',
-  '29': 'GB', '33': 'FR', '34': 'DE', '37': 'NL', '42': 'AU',
-  '64': 'VN', '65': 'PH', '66': 'SG', '67': 'TH', '68': 'MY', '69': 'TW', '70': 'KR', '71': 'JP',
-  '73': 'AU', '75': 'VN', '79': 'IN', '94': 'CN', '110': 'ID', '140': 'VN',
 };
 
 function text(value: unknown) {
@@ -48,14 +42,9 @@ function dataRows(value: unknown) {
   return Array.isArray(body.data) ? body.data.map(objectValue) : [];
 }
 
-export function countryFromTimezone(timezoneId?: string) {
-  if (!timezoneId) return '';
-  return TIMEZONE_COUNTRY[String(timezoneId)] || '';
-}
-
-/** Kept for compatibility: a BM kind is derived only from known capacity, never current account count. */
-export function classifyBmKind(_adAccountCount: number, _pageCount: number, accountCapacity?: number | null) {
-  return bmClassification(accountCapacity, _adAccountCount).bmType;
+/** Kept for compatibility: BM type is derived only from verified owned ad accounts. */
+export function classifyBmKind(ownedAdAccountCount: number, _pageCount: number, accountCapacity?: number | null) {
+  return bmClassification(accountCapacity, ownedAdAccountCount, ownedAdAccountCount, ownedAdAccountCount).bmType;
 }
 
 export function classifyBmLevel(shareLimit?: number | string) {
@@ -64,13 +53,20 @@ export function classifyBmLevel(shareLimit?: number | string) {
 }
 
 export function applyBmProfile(asset: Asset, profile: Partial<BmProfile>): Asset {
-  const adAccountCount = profile.adAccountCount ?? Number(asset.adAccountCount || 0);
+  const adAccountCount = profile.adAccountCount ?? asset.adAccountCount ?? null;
+  const ownedAdAccountCount = profile.ownedAdAccountCount ?? asset.ownedAdAccountCount ?? null;
   const accountCapacity = profile.accountCapacity !== undefined && profile.accountCapacity !== null
     ? profile.accountCapacity
     : asset.accountCapacity ?? null;
   const profileType = profile.bmType && profile.bmType !== 'UNKNOWN' ? profile.bmType : profile.kind && profile.kind !== 'UNKNOWN' ? profile.kind : '';
-  const bmType = profileType || asset.bmType || bmClassification(accountCapacity, adAccountCount).bmType;
-  const country = profile.country || countryFromTimezone(profile.timezoneId || asset.timezoneId) || asset.country || 'Chưa rõ';
+  const derivedType = bmClassification(
+    accountCapacity,
+    adAccountCount ?? 0,
+    ownedAdAccountCount,
+    asset.observedOwnedAdAccountCount || 0,
+  ).bmType;
+  const bmType = profileType || derivedType;
+  const country = profile.country || asset.country || 'Chưa đọc được';
   return {
     ...asset,
     name: profile.name || asset.name,
@@ -83,6 +79,7 @@ export function applyBmProfile(asset: Asset, profile: Partial<BmProfile>): Asset
     accountCapacity,
     limit: accountCapacity === null ? 'unknown' : String(accountCapacity),
     adAccountCount,
+    ownedAdAccountCount,
     pageCount: profile.pageCount ?? asset.pageCount,
     userCount: profile.userCount ?? asset.userCount,
     currencies: profile.currencies || asset.currencies,
@@ -97,8 +94,18 @@ export function applyBmProfile(asset: Asset, profile: Partial<BmProfile>): Asset
 }
 
 export async function readBmProfile(token: string, businessId: string): Promise<BmProfile> {
-  const body = await graphWithToken(token, businessId, {
-    fields: [
+  const fieldGroups = [
+    [
+      'id,name,created_time,verification_status,timezone_id,vertical,business_country_code',
+      'primary_page{id,name,location{country,city,country_code}}',
+      'created_by{id,name}',
+      'owned_ad_accounts.limit(100){id,name,account_status,currency}',
+      'client_ad_accounts.limit(100){id,name,account_status,currency}',
+      'owned_pages.limit(100){id,name}',
+      'client_pages.limit(100){id,name}',
+      'business_users.limit(100){id,name,role}',
+    ].join(','),
+    [
       'id,name,created_time,verification_status,timezone_id,vertical',
       'primary_page{id,name,location{country,city,country_code}}',
       'created_by{id,name}',
@@ -108,12 +115,20 @@ export async function readBmProfile(token: string, businessId: string): Promise<
       'client_pages.limit(100){id,name}',
       'business_users.limit(100){id,name,role}',
     ].join(','),
-  });
+  ];
+  let body: MetaObject;
+  try {
+    body = await graphWithToken(token, businessId, { fields: fieldGroups[0] });
+  } catch {
+    body = await graphWithToken(token, businessId, { fields: fieldGroups[1] });
+  }
   const primary = objectValue(body.primary_page);
-  const location = objectValue(primary.location);
   const createdBy = objectValue(body.created_by);
-  const accounts = mergeDiscoveredAssets([
+  const ownedAccounts = mergeDiscoveredAssets([
     ...dataRows(body.owned_ad_accounts).map((row) => ({ id: text(row.id).replace(/^act_/, ''), name: text(row.name), currency: text(row.currency), sources: ['bm_owned' as const] })),
+  ]);
+  const accounts = mergeDiscoveredAssets([
+    ...ownedAccounts,
     ...dataRows(body.client_ad_accounts).map((row) => ({ id: text(row.id).replace(/^act_/, ''), name: text(row.name), currency: text(row.currency), sources: ['bm_client' as const] })),
   ]);
   const pages = mergeDiscoveredAssets([
@@ -121,12 +136,18 @@ export async function readBmProfile(token: string, businessId: string): Promise<
     ...dataRows(body.client_pages).map((row) => ({ id: text(row.id), name: text(row.name), sources: ['bm_client' as const] })),
   ]);
   const currency = aggregateCurrencies(accounts.map((account) => account.currency));
-  const classification = bmClassification(null, accounts.length);
+  const ownedAccountsReadable = Array.isArray(objectValue(body.owned_ad_accounts).data);
+  const classification = bmClassification(
+    null,
+    accounts.length,
+    ownedAccountsReadable ? ownedAccounts.length : null,
+    ownedAccountsReadable ? ownedAccounts.length : 0,
+  );
   const timezoneId = text(body.timezone_id);
   return {
     name: text(body.name) || `BM ${businessId}`,
     timezoneId,
-    country: text(location.country_code) || text(location.country) || countryFromTimezone(timezoneId) || 'Chưa rõ',
+    country: text(body.business_country_code).toUpperCase() || 'Chưa đọc được',
     verificationStatus: text(body.verification_status) || 'unknown',
     vertical: text(body.vertical),
     createdTime: text(body.created_time),
@@ -196,9 +217,25 @@ function createDocIds(html: string) {
   return [...ids];
 }
 
+export type PreparedSession = { uid: string; dtsg: string; tokens: string[] };
+
+/**
+ * Đọc cookie session đúng MỘT lần cho cả batch tạo BM: uid, fb_dtsg và các token
+ * nhúng trong trang Facebook. Truyền kết quả này vào createBusinessAccount để
+ * không phải fetch lại trang Facebook cho từng BM.
+ */
+export async function prepareCookieSession(cookie?: string): Promise<PreparedSession | null> {
+  const cleaned = String(cookie || '').trim();
+  if (!cleaned) return null;
+  const inspection = await inspectCookieSession(cleaned).catch(() => null);
+  if (!inspection?.alive) return null;
+  return { uid: inspection.uid, dtsg: inspection.dtsg, tokens: inspection.tokens };
+}
+
 export async function createBusinessAccount(input: {
   token: string;
   cookie?: string;
+  session?: PreparedSession | null;
   name: string;
   vertical: string;
   timezoneId: number | string;
@@ -213,7 +250,7 @@ export async function createBusinessAccount(input: {
   };
   if (input.primaryPage && /^\d{5,30}$/.test(input.primaryPage)) payload.primary_page = input.primaryPage;
 
-  const session = input.cookie ? await inspectCookieSession(input.cookie).catch(() => null) : null;
+  const session = input.session !== undefined ? input.session : await prepareCookieSession(input.cookie);
   const graphTokens = [...new Set([input.token, ...(session?.tokens || [])].filter(Boolean))].slice(0, 3);
 
   for (const token of graphTokens) {
