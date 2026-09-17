@@ -3,7 +3,6 @@ import type { Asset } from '../../../lib/data';
 import {
   discoverAccountSnapshot,
   toStoredAccountSnapshot,
-  type StoredAccountSnapshot,
 } from '../../../lib/account-snapshot';
 import { canonicalOpenUrl } from '../../../lib/resource-model';
 import { audit, db, list, owner, put } from '../../../lib/server';
@@ -38,23 +37,13 @@ export async function POST(req: Request) {
     const workspaceOwner = await owner();
     const input = requestSchema.parse(await req.json());
     const source = await getMetaTokenSecret(workspaceOwner, input.tokenId);
-    const [storedSnapshots, existing] = await Promise.all([
-      list(workspaceOwner, 'account-snapshot') as Promise<StoredAccountSnapshot[]>,
-      list(workspaceOwner, 'asset') as Promise<Asset[]>,
-    ]);
-    const savedSnapshot = storedSnapshots.find((snapshot) => snapshot.tokenId === input.tokenId);
-    let snapshot: StoredAccountSnapshot;
-
-    if (savedSnapshot) {
-      snapshot = savedSnapshot;
-    } else {
-      const uidHint = source.record.metaUserId || uidFromLabel(source.record.label);
-      let cookie = '';
-      try { cookie = await getSessionCookieByUid(workspaceOwner, uidHint); } catch { cookie = ''; }
-      const discovered = await discoverAccountSnapshot({ token: source.token, cookie: cookie || undefined });
-      snapshot = toStoredAccountSnapshot(workspaceOwner, input.tokenId, discovered);
-      await put(workspaceOwner, 'account-snapshot', snapshot).run();
-    }
+    const existing = await list(workspaceOwner, 'asset') as Asset[];
+    const uidHint = source.record.metaUserId || uidFromLabel(source.record.label);
+    let cookie = '';
+    try { cookie = await getSessionCookieByUid(workspaceOwner, uidHint); } catch { cookie = ''; }
+    const discovered = await discoverAccountSnapshot({ token: source.token, cookie: cookie || undefined });
+    const snapshot = toStoredAccountSnapshot(workspaceOwner, input.tokenId, discovered);
+    await put(workspaceOwner, 'account-snapshot', snapshot).run();
 
     const now = new Date().toISOString();
     const existingById = new Map(existing.map((asset) => [asset.id, asset] as const));
@@ -172,7 +161,11 @@ export async function POST(req: Request) {
     }
 
     const assets = [...imported.values()];
-    const statements = assets.map((asset) => put(workspaceOwner, 'asset', asset));
+    const stale = existing.filter((asset) => asset.sourceTokenId === source.record.id && !imported.has(asset.id));
+    const statements = [
+      ...stale.map((asset) => db().prepare('DELETE FROM records WHERE owner = ? AND kind = ? AND id = ?').bind(workspaceOwner, 'asset', asset.id)),
+      ...assets.map((asset) => put(workspaceOwner, 'asset', asset)),
+    ];
     for (let index = 0; index < statements.length; index += 50) await db().batch(statements.slice(index, index + 50));
 
     await updateMetaToken(workspaceOwner, source.record, {

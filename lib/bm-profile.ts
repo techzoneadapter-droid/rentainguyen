@@ -2,7 +2,7 @@ import type { AccountSnapshot, StoredAccountSnapshot } from './account-snapshot'
 import type { Asset } from './data';
 import { MetaCreationError, toStructuredMetaError, type StructuredMetaError } from './meta-errors';
 import { aggregateCurrencies, bmClassification, mergeDiscoveredAssets } from './resource-model';
-import { inspectCookieSession } from './meta-session';
+import { extractDtsg, facebookFetch, inspectCookieSession } from './meta-session';
 import { graphPostWithToken, graphWithToken, type MetaObject } from './meta-tokens';
 
 export type BmProfile = {
@@ -172,6 +172,30 @@ function findBusinessId(value: unknown, parentKey = ''): string {
   return '';
 }
 
+function graphqlErrorMessage(parsed: MetaObject, raw: string) {
+  const listed = Array.isArray(parsed.errors) ? parsed.errors : [];
+  const first = objectValue(listed[0]);
+  return text(first.message)
+    || text(objectValue(parsed.error).message)
+    || text(parsed.message)
+    || raw.replace(/^for \(;;\);\s*/, '').slice(0, 300)
+    || 'Cookie GraphQL không trả Business ID.';
+}
+
+function createDocIds(html: string) {
+  const ids = new Set<string>();
+  const patterns = [
+    /CreateBusiness[A-Za-z0-9_]*["']?\s*[:=,]\s*["'](\d{13,20})["']/g,
+    /["'](\d{13,20})["'][^]{0,100}CreateBusiness/gi,
+    /"doc_id"\s*:\s*"(\d{13,20})"[\s\S]{0,160}CreateBusiness/g,
+    /CreateBusiness[\s\S]{0,160}"doc_id"\s*:\s*"(\d{13,20})"/g,
+  ];
+  for (const pattern of patterns) {
+    for (const match of html.matchAll(pattern)) ids.add(match[1]);
+  }
+  return [...ids];
+}
+
 export async function createBusinessAccount(input: {
   token: string;
   cookie?: string;
@@ -189,9 +213,12 @@ export async function createBusinessAccount(input: {
   };
   if (input.primaryPage && /^\d{5,30}$/.test(input.primaryPage)) payload.primary_page = input.primaryPage;
 
-  if (input.token) {
+  const session = input.cookie ? await inspectCookieSession(input.cookie).catch(() => null) : null;
+  const graphTokens = [...new Set([input.token, ...(session?.tokens || [])].filter(Boolean))].slice(0, 3);
+
+  for (const token of graphTokens) {
     try {
-      const created = await graphPostWithToken(input.token, `${input.snapshot.actor.id}/businesses`, payload);
+      const created = await graphPostWithToken(token, `${input.snapshot.actor.id}/businesses`, payload);
       const id = text(created.id);
       if (!/^\d{5,30}$/.test(id)) {
         throw { message: 'Meta Graph phản hồi nhưng không trả Business ID.', raw: created, httpStatus: 502, code: 502 };
@@ -202,48 +229,70 @@ export async function createBusinessAccount(input: {
     }
   }
 
-  if (input.cookie) {
+  if (input.cookie && session) {
     try {
-      const session = await inspectCookieSession(input.cookie);
       if (!session.dtsg) throw new Error('Cookie sống nhưng không lấy được fb_dtsg.');
+      const createPage = await facebookFetch(input.cookie, 'https://business.facebook.com/', {
+        signal: AbortSignal.timeout(12000),
+      }).catch(() => ({ text: '', url: '', response: undefined as unknown as Response }));
+      const dtsg = extractDtsg(createPage.text) || session.dtsg;
+      const docIds = createDocIds(createPage.text);
+      const friendlyNames = [
+        'XFBBizWebCreateBusinessMutation',
+        'BizWebCreateBusinessMutation',
+        'BusinessComposerCreateMutation',
+        'BizKitSettingsBusinessCreationMutation',
+      ];
       const sessionInput: Record<string, unknown> = {
         name: input.name,
         timezone_id: Number(input.timezoneId) || 140,
         vertical: input.vertical,
+        creation_source: 'biz_web',
         client_mutation_id: crypto.randomUUID(),
       };
       if (input.primaryPage && /^\d{5,30}$/.test(input.primaryPage)) {
         sessionInput.primary_page_id = input.primaryPage;
       }
-      const body = new URLSearchParams({
-        av: session.uid,
-        __user: session.uid,
-        __a: '1',
-        fb_dtsg: session.dtsg,
-        fb_api_caller_class: 'RelayModern',
-        fb_api_req_friendly_name: 'XFBBizWebCreateBusinessMutation',
-        server_timestamps: 'true',
-        variables: JSON.stringify({ input: sessionInput }),
-      });
-      const response = await fetch('https://business.facebook.com/api/graphql', {
-        method: 'POST',
-        headers: {
-          Cookie: input.cookie,
-          'Content-Type': 'application/x-www-form-urlencoded',
-          Origin: 'https://business.facebook.com',
-          Referer: 'https://business.facebook.com/',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        },
-        body,
-        signal: AbortSignal.timeout(20000),
-      });
-      const raw = await response.text();
-      const parsed = parseSessionBody(raw);
-      const id = findBusinessId(parsed);
-      if (!response.ok || !id) {
-        throw { body: parsed, httpStatus: response.status, message: text(parsed.message) || 'Cookie GraphQL không trả Business ID.' };
+
+      const attempts: Array<{ friendly: string; docId?: string }> = [
+        ...friendlyNames.map((friendly) => ({ friendly })),
+        ...docIds.flatMap((docId) => friendlyNames.map((friendly) => ({ friendly, docId }))),
+      ];
+
+      let lastMessage = 'Cookie GraphQL không trả Business ID.';
+      for (const attempt of attempts.slice(0, 12)) {
+        const body = new URLSearchParams({
+          av: session.uid,
+          __user: session.uid,
+          __a: '1',
+          fb_dtsg: dtsg,
+          fb_api_caller_class: 'RelayModern',
+          fb_api_req_friendly_name: attempt.friendly,
+          server_timestamps: 'true',
+          variables: JSON.stringify({ input: sessionInput }),
+        });
+        if (attempt.docId) body.set('doc_id', attempt.docId);
+        const response = await facebookFetch(input.cookie, 'https://business.facebook.com/api/graphql', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            Accept: '*/*',
+            Origin: 'https://business.facebook.com',
+            Referer: 'https://business.facebook.com/',
+            'Sec-Fetch-Site': 'same-origin',
+            'Sec-Fetch-Mode': 'cors',
+          },
+          body,
+          signal: AbortSignal.timeout(20000),
+        });
+        const parsed = parseSessionBody(response.text);
+        const id = findBusinessId(parsed) || response.text.match(/"id"\s*:\s*"(\d{10,30})"/)?.[1] || '';
+        if (id) {
+          return { id, name: input.name, source: 'session' as const, snapshot: input.snapshot, errors };
+        }
+        lastMessage = graphqlErrorMessage(parsed, response.text);
       }
-      return { id, name: input.name, source: 'session' as const, snapshot: input.snapshot, errors };
+      throw { message: lastMessage, body: { message: lastMessage }, httpStatus: 400 };
     } catch (error) {
       errors.push(toStructuredMetaError(error, { source: 'session', stage: 'session_create' }));
     }

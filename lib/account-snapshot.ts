@@ -76,12 +76,12 @@ function objectValue(value: unknown): MetaObject {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as MetaObject : {};
 }
 
-async function safeList(token: string, path: string, fields: string, warnings: string[]) {
+async function tryList(token: string, path: string, fields: string, warnings: string[]) {
   try {
-    return await graphListWithToken(token, path, fields, 20);
+    return { ok: true as const, rows: await graphListWithToken(token, path, fields, 20) };
   } catch (error) {
     warnings.push(`${path}: ${classifyMetaTokenError(error).reason}`);
-    return [];
+    return { ok: false as const, rows: [] as MetaObject[] };
   }
 }
 
@@ -121,19 +121,8 @@ export async function discoverAccountSnapshot(input: { token?: string; cookie?: 
   const inspection = await inspectAccount(input);
   const token = inspection.workingToken || String(input.token || '').trim();
   const warnings = [...inspection.warnings];
-  const businessRows: Array<MetaObject & { sources: AssetDiscoverySource[] }> = inspection.businesses.map((business) => ({
-    id: business.id,
-    name: business.name,
-    verification_status: business.verificationStatus,
-    sources: ['session'],
-  }));
-  const adRows: SnapshotAdAccount[] = inspection.adAccounts.map((account) => ({
-    id: account.id,
-    name: account.name,
-    accountStatus: account.accountStatus,
-    sources: ['session'],
-    businessIds: [],
-  }));
+  const businessRows: Array<MetaObject & { sources: AssetDiscoverySource[] }> = [];
+  const adRows: SnapshotAdAccount[] = [];
   const pageRows: SnapshotPage[] = inspection.pages.map((page) => ({
     id: page.id,
     name: page.name,
@@ -143,30 +132,58 @@ export async function discoverAccountSnapshot(input: { token?: string; cookie?: 
   }));
   const pixelRows: SnapshotPixel[] = [];
 
+  let graphBusinessesOk = false;
+  let graphAdsOk = false;
   if (token) {
     const [graphBusinesses, graphAccounts] = await Promise.all([
-      safeList(token, `${inspection.me.id}/businesses`, 'id,name,verification_status,timezone_id,primary_page,created_time', warnings),
-      safeList(token, `${inspection.me.id}/adaccounts`, 'id,name,account_status,disable_reason,spend_cap,currency', warnings),
+      tryList(token, `${inspection.me.id}/businesses`, 'id,name,verification_status,timezone_id,primary_page,created_time', warnings),
+      tryList(token, `${inspection.me.id}/adaccounts`, 'id,name,account_status,disable_reason,spend_cap,currency', warnings),
     ]);
-    businessRows.push(...graphBusinesses.map((row) => ({ ...row, sources: ['graph_accounts' as const] })));
-    adRows.push(...graphAccounts.map((row) => ({
-      id: validId(row.id),
-      name: text(row.name) || `Ads ${validId(row.id)}`,
-      accountStatus: Number(row.account_status || 0) || undefined,
-      disableReason: Number(row.disable_reason || 0) || undefined,
-      spendCap: text(row.spend_cap) || undefined,
-      currency: text(row.currency).toUpperCase() || undefined,
-      sources: ['graph_accounts' as const],
+    graphBusinessesOk = graphBusinesses.ok;
+    graphAdsOk = graphAccounts.ok;
+    if (graphBusinesses.ok) {
+      businessRows.push(...graphBusinesses.rows.map((row) => ({ ...row, sources: ['graph_accounts' as const] })));
+    }
+    if (graphAccounts.ok) {
+      adRows.push(...graphAccounts.rows.map((row) => ({
+        id: validId(row.id),
+        name: text(row.name) || `Ads ${validId(row.id)}`,
+        accountStatus: Number(row.account_status || 0) || undefined,
+        disableReason: Number(row.disable_reason || 0) || undefined,
+        spendCap: text(row.spend_cap) || undefined,
+        currency: text(row.currency).toUpperCase() || undefined,
+        sources: ['graph_accounts' as const],
+        businessIds: [],
+      })));
+    }
+  }
+
+  if (!graphBusinessesOk) {
+    businessRows.push(...inspection.businesses.map((business) => ({
+      id: business.id,
+      name: business.name,
+      verification_status: business.verificationStatus,
+      sources: ['session' as const],
+    })));
+  }
+  if (!graphAdsOk) {
+    adRows.push(...inspection.adAccounts.map((account) => ({
+      id: account.id,
+      name: account.name,
+      accountStatus: account.accountStatus,
+      sources: ['session' as const],
       businessIds: [],
     })));
   }
 
+  const actorId = validId(inspection.me.id);
+  const pageIds = new Set(pageRows.map((row) => validId(row.id)).filter(Boolean));
   const businessesBase = mergeDiscoveredAssets(businessRows.map((row) => ({
     ...row,
     id: validId(row.id),
     name: text(row.name) || `BM ${validId(row.id)}`,
     sources: row.sources,
-  })));
+  }))).filter((row) => row.id && row.id !== actorId && !pageIds.has(row.id));
 
   const businessDetails = new Map<string, {
     ownedAds: SnapshotAdAccount[];
@@ -181,11 +198,11 @@ export async function discoverAccountSnapshot(input: { token?: string; cookie?: 
       await Promise.all(businessesBase.slice(offset, offset + 4).map(async (business) => {
         const businessId = business.id;
         const [ownedAds, clientAds, ownedPages, clientPages, pixels] = await Promise.all([
-          safeList(token, `${businessId}/owned_ad_accounts`, 'id,name,account_status,disable_reason,spend_cap,currency', warnings),
-          safeList(token, `${businessId}/client_ad_accounts`, 'id,name,account_status,disable_reason,spend_cap,currency', warnings),
-          safeList(token, `${businessId}/owned_pages`, 'id,name,tasks', warnings),
-          safeList(token, `${businessId}/client_pages`, 'id,name,tasks', warnings),
-          safeList(token, `${businessId}/adspixels`, 'id,name', warnings),
+          tryList(token, `${businessId}/owned_ad_accounts`, 'id,name,account_status,disable_reason,spend_cap,currency', warnings),
+          tryList(token, `${businessId}/client_ad_accounts`, 'id,name,account_status,disable_reason,spend_cap,currency', warnings),
+          tryList(token, `${businessId}/owned_pages`, 'id,name,tasks', warnings),
+          tryList(token, `${businessId}/client_pages`, 'id,name,tasks', warnings),
+          tryList(token, `${businessId}/adspixels`, 'id,name', warnings),
         ]);
         const mapAd = (row: MetaObject, source: AssetDiscoverySource): SnapshotAdAccount => ({
           id: validId(row.id),
@@ -205,11 +222,11 @@ export async function discoverAccountSnapshot(input: { token?: string; cookie?: 
           businessIds: [businessId],
         });
         businessDetails.set(businessId, {
-          ownedAds: ownedAds.map((row) => mapAd(row, 'bm_owned')),
-          clientAds: clientAds.map((row) => mapAd(row, 'bm_client')),
-          ownedPages: ownedPages.map((row) => mapPage(row, 'bm_owned')),
-          clientPages: clientPages.map((row) => mapPage(row, 'bm_client')),
-          pixels: pixels.map((row) => ({
+          ownedAds: ownedAds.rows.map((row) => mapAd(row, 'bm_owned')),
+          clientAds: clientAds.rows.map((row) => mapAd(row, 'bm_client')),
+          ownedPages: ownedPages.rows.map((row) => mapPage(row, 'bm_owned')),
+          clientPages: clientPages.rows.map((row) => mapPage(row, 'bm_client')),
+          pixels: pixels.rows.map((row) => ({
             id: validId(row.id),
             name: text(row.name) || `Pixel ${validId(row.id)}`,
             sources: ['bm_owned'],
@@ -226,11 +243,15 @@ export async function discoverAccountSnapshot(input: { token?: string; cookie?: 
     pixelRows.push(...detail.pixels);
   }
 
-  const adAccounts = mergeDiscoveredAssets(adRows.map((row) => ({ ...row, id: validId(row.id) }))).map((row) => ({
+  const adAccounts = mergeDiscoveredAssets(adRows.map((row) => ({ ...row, id: validId(row.id) }))).filter((row) => (
+    row.id && row.id !== actorId && !pageIds.has(row.id)
+  )).map((row) => ({
     ...row,
     businessIds: [...new Set(row.businessIds || [])],
   }));
-  const pages = mergeDiscoveredAssets(pageRows.map((row) => ({ ...row, id: validId(row.id) }))).map((row) => ({
+  const pages = mergeDiscoveredAssets(pageRows.map((row) => ({ ...row, id: validId(row.id) }))).filter((row) => (
+    row.id && row.id !== actorId
+  )).map((row) => ({
     ...row,
     businessIds: [...new Set(row.businessIds || [])],
   }));
