@@ -1,6 +1,10 @@
 import { z } from 'zod';
 import type { Asset } from '../../../lib/data';
 import {
+  classifyAdDelivery,
+  readSourceFromSources,
+} from '../../../lib/ad-status';
+import {
   discoverAccountSnapshot,
   toStoredAccountSnapshot,
 } from '../../../lib/account-snapshot';
@@ -8,6 +12,7 @@ import { canonicalOpenUrl } from '../../../lib/resource-model';
 import { audit, db, list, owner, put } from '../../../lib/server';
 import { getSessionCookieByUid, uidFromLabel } from '../../../lib/credential-vault';
 import { getMetaTokenSecret, updateMetaToken } from '../../../lib/meta-tokens';
+import { redactSecrets } from '../../../lib/redact';
 
 const requestSchema = z.object({
   action: z.literal('import_token'),
@@ -23,12 +28,25 @@ function assetId(workspaceOwner: string, metaId: string) {
   return `${workspaceOwner}:meta:${metaId}`;
 }
 
-function adAccountStatus(value: unknown) {
-  if (value === undefined || value === null || value === '') return 'Chưa đọc được';
-  const status = Number(value);
-  if (status === 1) return 'LIVE';
-  if ([2, 101].includes(status)) return 'DIE';
-  return 'Hạn chế';
+/**
+ * Chuỗi hiển thị gọn cho asset.status; model đầy đủ nằm ở
+ * accessStatus/deliveryStatus/readSource/rawAccountStatus trên asset.
+ * TKQC thấy trong snapshot = ACCESSIBLE, kể cả khi account_status chưa đọc được
+ * (session tìm thấy nhưng không có status → "Truy cập được", KHÔNG "Chưa đọc được").
+ */
+const DELIVERY_DISPLAY: Record<string, string> = {
+  LIVE: 'LIVE',
+  DISABLED: 'DIE',
+  RESTRICTED: 'Hạn chế',
+  PENDING: 'Chờ xử lý',
+  UNSETTLED: 'Chưa thanh toán',
+  CLOSED: 'Đã đóng',
+};
+function adAccountStatusLabel(value: unknown, accessible: boolean) {
+  const { deliveryStatus } = classifyAdDelivery(value);
+  if (deliveryStatus === 'UNKNOWN') return accessible ? 'Truy cập được' : 'Chưa đọc được';
+  if (deliveryStatus === 'LIVE') return DELIVERY_DISPLAY.LIVE;
+  return DELIVERY_DISPLAY[deliveryStatus] || 'Chưa xác định';
 }
 
 function isGenericBusinessName(name: string, businessId: string) {
@@ -61,6 +79,8 @@ export async function POST(req: Request) {
     const common = (current?: Asset) => ({
       source: 'meta',
       checked: snapshot.capturedAt || now,
+      // Freshness riêng cho resource scan, không trộn với auth/status check.
+      resourceScannedAt: snapshot.capturedAt || now,
       sourceTokenId: source.record.id,
       createdById: snapshot.actor.id || current?.createdById,
       createdByName: snapshot.actor.name || current?.createdByName,
@@ -72,13 +92,14 @@ export async function POST(req: Request) {
       const current = existingById.get(id);
       const currency = account.currency || current?.currency || '';
       const accountStatus = account.accountStatus;
+      const delivery = classifyAdDelivery(accountStatus);
       const asset: Asset = {
         ...current,
         id,
         metaId: account.id,
         name: account.name || current?.name || `Ads ${account.id}`,
         type: 'TKQC',
-        status: adAccountStatus(accountStatus),
+        status: adAccountStatusLabel(accountStatus, true),
         verified: false,
         country: account.country || 'Chưa đọc được',
         tier: current?.tier || '—',
@@ -87,6 +108,10 @@ export async function POST(req: Request) {
         currency,
         metaStatus: accountStatus,
         accountStatus,
+        rawAccountStatus: delivery.rawAccountStatus ?? current?.rawAccountStatus,
+        accessStatus: 'ACCESSIBLE',
+        deliveryStatus: delivery.deliveryStatus,
+        readSource: readSourceFromSources(account.sources) === 'UNKNOWN' ? current?.readSource : readSourceFromSources(account.sources),
         disableReason: account.disableReason ?? current?.disableReason,
         amountSpent: account.amountSpent || current?.amountSpent,
         balance: account.balance || current?.balance,
@@ -256,6 +281,6 @@ export async function POST(req: Request) {
     });
   } catch (error) {
     if (error instanceof z.ZodError) return Response.json({ error: 'Token nguồn không hợp lệ.' }, { status: 400 });
-    return Response.json({ error: (error as Error).message }, { status: 400 });
+    return Response.json({ error: redactSecrets((error as Error).message) }, { status: 400 });
   }
 }

@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type { Asset } from '../../../lib/data';
 import { generateBmAccessLink } from '../../../lib/bm-access-link';
 import { runIndependentBatch } from '../../../lib/resource-model';
+import { redactSecrets } from '../../../lib/redact';
 import { audit, db, list, owner, put } from '../../../lib/server';
 
 const schema = z.object({
@@ -40,7 +41,7 @@ export async function POST(req: Request) {
         await put(workspaceOwner, 'asset', next).run();
         return { assetId: asset.id, businessId: asset.metaId, accessLink };
       } catch (error) {
-        await put(workspaceOwner, 'asset', { ...asset, accessLinkStatus: 'failed', accessLinkError: (error as Error).message, shopStatus: 'not_ready' }).run();
+        await put(workspaceOwner, 'asset', { ...asset, accessLinkStatus: 'failed', accessLinkError: redactSecrets((error as Error).message), shopStatus: 'not_ready' }).run();
         throw error;
       }
     }, input);
@@ -49,7 +50,7 @@ export async function POST(req: Request) {
       assetId: result.item.id,
       businessId: result.item.metaId,
       name: result.item.name,
-      error: (result.error as Error).message,
+      error: redactSecrets((result.error as Error).message),
     }));
     await db().batch([audit(workspaceOwner, `Sinh access link BM: ${successes.length} thành công, ${failures.length} thất bại`)]);
     return Response.json({
@@ -60,6 +61,6 @@ export async function POST(req: Request) {
     });
   } catch (error) {
     if (error instanceof z.ZodError) return Response.json({ error: 'Danh sách BM hoặc cấu hình batch không hợp lệ.' }, { status: 400 });
-    return Response.json({ error: (error as Error).message }, { status: 400 });
+    return Response.json({ error: redactSecrets((error as Error).message) }, { status: 400 });
   }
 }

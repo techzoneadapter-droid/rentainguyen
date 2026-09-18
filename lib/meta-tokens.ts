@@ -332,10 +332,11 @@ async function metaRequestOnce(
     options.method = 'POST';
     options.body = body;
   } else {
+    // Token KHÔNG bao giờ nằm trong URL (query) — chỉ đi qua header Authorization,
+    // tránh bị log/audit/proxy ghi lại. oauth-header cũng vậy: một header duy nhất.
     for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
-    url.searchParams.set('access_token', token);
     url.searchParams.set('format', 'json');
-    if (style.mode === 'oauth-header') headers.Authorization = `OAuth ${token}`;
+    headers.Authorization = style.mode === 'oauth-header' ? `OAuth ${token}` : `Bearer ${token}`;
     options.method = 'GET';
   }
 

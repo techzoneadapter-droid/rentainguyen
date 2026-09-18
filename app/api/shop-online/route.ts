@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { Asset } from '../../../lib/data';
 import { runIndependentBatch } from '../../../lib/resource-model';
+import { redactSecrets } from '../../../lib/redact';
 import { pushBmToShop, shopConfiguration } from '../../../lib/shop-online';
 import { audit, list, owner, put } from '../../../lib/server';
 
@@ -38,12 +39,12 @@ export async function POST(req: Request) {
         await put(workspaceOwner, 'asset', { ...asset, shopStatus: 'pushed', shopProductId: pushed.productId, shopSyncedAt: now, shopError: '' }).run();
         return { assetId: asset.id, productId: pushed.productId, idempotent: pushed.idempotent };
       } catch (error) {
-        await put(workspaceOwner, 'asset', { ...asset, shopStatus: 'failed', shopError: (error as Error).message }).run();
+        await put(workspaceOwner, 'asset', { ...asset, shopStatus: 'failed', shopError: redactSecrets((error as Error).message) }).run();
         throw error;
       }
     }, input);
     const successes = results.filter((result) => result.ok);
-    const failures = results.filter((result) => !result.ok).map((result) => ({ assetId: result.item.id, businessId: result.item.metaId, name: result.item.name, error: (result.error as Error).message }));
+    const failures = results.filter((result) => !result.ok).map((result) => ({ assetId: result.item.id, businessId: result.item.metaId, name: result.item.name, error: redactSecrets((result.error as Error).message) }));
     await audit(workspaceOwner, `Đẩy Shop Online: ${successes.length} thành công, ${failures.length} thất bại`).run();
     return Response.json({
       ok: failures.length === 0,
@@ -53,6 +54,6 @@ export async function POST(req: Request) {
     });
   } catch (error) {
     if (error instanceof z.ZodError) return Response.json({ error: 'Danh sách BM hoặc cấu hình batch không hợp lệ.' }, { status: 400 });
-    return Response.json({ error: (error as Error).message }, { status: 400 });
+    return Response.json({ error: redactSecrets((error as Error).message) }, { status: 400 });
   }
 }

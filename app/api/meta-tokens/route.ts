@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { audit, db, owner, put } from '../../../lib/server';
+import { redactSecrets } from '../../../lib/redact';
 import {
   classifyMetaTokenError,
   encryptToken,
@@ -59,7 +60,7 @@ export async function GET() {
     const tokens = (await getMetaTokens(user)).map(publicToken);
     return Response.json({ tokens });
   } catch (error) {
-    return Response.json({ error: (error as Error).message }, { status: 400 });
+    return Response.json({ error: redactSecrets((error as Error).message) }, { status: 400 });
   }
 }
 
@@ -192,6 +193,6 @@ export async function POST(req: Request) {
     if (error instanceof z.ZodError) {
       return Response.json({ error: 'Dữ liệu quản lý token không hợp lệ.' }, { status: 400 });
     }
-    return Response.json({ error: (error as Error).message }, { status: 400 });
+    return Response.json({ error: redactSecrets((error as Error).message) }, { status: 400 });
   }
 }

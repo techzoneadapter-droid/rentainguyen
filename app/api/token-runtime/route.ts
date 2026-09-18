@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { Asset } from '../../../lib/data';
+import { summarizeAdBuckets } from '../../../lib/ad-status';
 import { discoverAccountSnapshot, toStoredAccountSnapshot } from '../../../lib/account-snapshot';
 import { audit, db, list, owner, put } from '../../../lib/server';
 import { getSessionCookieByUid, uidFromLabel } from '../../../lib/credential-vault';
@@ -15,6 +16,17 @@ import {
   type MetaTokenRecord,
   type MetaTokenStatus,
 } from '../../../lib/meta-tokens';
+import { redactSecrets } from '../../../lib/redact';
+
+type AdCounts = {
+  liveAdCount: number | null;
+  dieAdCount: number | null;
+  restrictedAdCount: number | null;
+  pendingAdCount: number | null;
+  unsettledAdCount: number | null;
+  closedAdCount: number | null;
+  unknownAdCount: number | null;
+};
 
 type TokenInventory = {
   id: string;
@@ -25,20 +37,18 @@ type TokenInventory = {
   permissions: string[];
   confirmedPermissions: string[];
   inferredPermissions: string[];
-  businessCount: number;
-  verifiedBusinessCount: number;
-  pageCount: number;
-  adAccountCount: number;
-  liveAdCount: number;
-  dieAdCount: number;
-  restrictedAdCount: number;
-  pixelCount: number;
-  totalResources: number;
+  // null = lần scan đó KHÔNG đọc được (scan fail / không đủ quyền), khác hẳn 0 thật.
+  businessCount: number | null;
+  verifiedBusinessCount: number | null;
+  pageCount: number | null;
+  adAccountCount: number | null;
+  pixelCount: number | null;
+  totalResources: number | null;
   warnings: string[];
   lastError?: string;
   scannedAt: string;
   created: string;
-};
+} & AdCounts;
 
 const importSchema = z.object({
   action: z.literal('import'),
@@ -85,13 +95,15 @@ function deleteRecord(workspaceOwner: string, kind: string, id: string) {
   return db().prepare('DELETE FROM records WHERE owner = ? AND kind = ? AND id = ?').bind(workspaceOwner, kind, id);
 }
 
-function adBucket(statusValue: unknown) {
-  const status = Number(statusValue || 0);
-  if (status === 1) return 'live' as const;
-  if ([2, 101].includes(status)) return 'die' as const;
-  return 'restricted' as const;
-}
+/**
+ * adBucket chuyển sang lib/ad-status.ts: undefined/null/'' → 'unknown',
+ * KHÔNG mặc định thành 'restricted' như bản dùng Number(statusValue || 0) cũ.
+ */
 
+/**
+ * Scan fail ≠ không có tài nguyên: mọi count là null để UI hiển thị "Chưa đọc được"
+ * thay vì fake 0. unknownAdCount giữ bucket riêng để total luôn bằng tổng bucket.
+ */
 function emptyInventory(workspaceOwner: string, record: MetaTokenRecord, now: string, status: MetaTokenStatus, lastError: string): TokenInventory {
   return {
     id: inventoryId(workspaceOwner, record.id),
@@ -100,15 +112,19 @@ function emptyInventory(workspaceOwner: string, record: MetaTokenRecord, now: st
     permissions: [],
     confirmedPermissions: [],
     inferredPermissions: [],
-    businessCount: 0,
-    verifiedBusinessCount: 0,
-    pageCount: 0,
-    adAccountCount: 0,
-    liveAdCount: 0,
-    dieAdCount: 0,
-    restrictedAdCount: 0,
-    pixelCount: 0,
-    totalResources: 0,
+    businessCount: null,
+    verifiedBusinessCount: null,
+    pageCount: null,
+    adAccountCount: null,
+    liveAdCount: null,
+    dieAdCount: null,
+    restrictedAdCount: null,
+    pendingAdCount: null,
+    unsettledAdCount: null,
+    closedAdCount: null,
+    unknownAdCount: null,
+    pixelCount: null,
+    totalResources: null,
     warnings: [],
     lastError,
     scannedAt: now,
@@ -137,9 +153,7 @@ async function scanToken(workspaceOwner: string, record: MetaTokenRecord, rawTok
     warnings.push(...snapshot.warnings);
     if (snapshot.source !== 'graph') warnings.push(`Nguồn check: ${snapshot.source}.`);
     const workingToken = snapshot.workingCredential.token || token;
-    const liveAdCount = snapshot.adAccounts.filter((account) => adBucket(account.accountStatus) === 'live').length;
-    const dieAdCount = snapshot.adAccounts.filter((account) => adBucket(account.accountStatus) === 'die').length;
-    const restrictedAdCount = Math.max(0, snapshot.adAccounts.length - liveAdCount - dieAdCount);
+    const buckets = summarizeAdBuckets(snapshot.adAccounts.map((account) => account.accountStatus));
     const inventory: TokenInventory = {
       id: inventoryId(workspaceOwner, record.id),
       tokenId: record.id,
@@ -153,9 +167,13 @@ async function scanToken(workspaceOwner: string, record: MetaTokenRecord, rawTok
       verifiedBusinessCount: snapshot.businesses.filter((business) => business.verificationStatus?.toLowerCase() === 'verified').length,
       pageCount: snapshot.pages.length,
       adAccountCount: snapshot.adAccounts.length,
-      liveAdCount,
-      dieAdCount,
-      restrictedAdCount,
+      liveAdCount: buckets.live,
+      dieAdCount: buckets.die,
+      restrictedAdCount: buckets.restricted,
+      pendingAdCount: buckets.pending,
+      unsettledAdCount: buckets.unsettled,
+      closedAdCount: buckets.closed,
+      unknownAdCount: buckets.unknown,
       pixelCount: snapshot.pixels.length,
       totalResources: snapshot.businesses.length + snapshot.adAccounts.length + snapshot.pages.length + snapshot.pixels.length,
       warnings: [...new Set(warnings)].slice(0, 40),
@@ -216,7 +234,7 @@ export async function GET() {
     const workspaceOwner = await owner();
     return Response.json({ tokens: await joinedRows(workspaceOwner) });
   } catch (error) {
-    return Response.json({ error: (error as Error).message }, { status: 400 });
+    return Response.json({ error: redactSecrets((error as Error).message) }, { status: 400 });
   }
 }
 
@@ -319,6 +337,6 @@ export async function POST(req: Request) {
     return Response.json({ processed: input.ids.length, inventories, tokens: await joinedRows(workspaceOwner) });
   } catch (error) {
     if (error instanceof z.ZodError) return Response.json({ error: 'Dữ liệu token không hợp lệ. Mỗi lượt tối đa 20 token khi nạp/check; xóa tối đa 100 token.' }, { status: 400 });
-    return Response.json({ error: (error as Error).message }, { status: 400 });
+    return Response.json({ error: redactSecrets((error as Error).message) }, { status: 400 });
   }
 }

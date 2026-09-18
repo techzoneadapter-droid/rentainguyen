@@ -232,6 +232,13 @@ export async function prepareCookieSession(cookie?: string): Promise<PreparedSes
   return { uid: inspection.uid, dtsg: inspection.dtsg, tokens: inspection.tokens };
 }
 
+export type CreatedBusinessCredential = {
+  kind: 'graph' | 'session';
+  /** Credential đã tạo BM thành công — chỉ dùng server-side cho post-create, KHÔNG trả về browser. */
+  token: string;
+  cookie: string;
+};
+
 export async function createBusinessAccount(input: {
   token: string;
   cookie?: string;
@@ -260,7 +267,16 @@ export async function createBusinessAccount(input: {
       if (!/^\d{5,30}$/.test(id)) {
         throw { message: 'Meta Graph phản hồi nhưng không trả Business ID.', raw: created, httpStatus: 502, code: 502 };
       }
-      return { id, name: input.name, source: 'graph' as const, snapshot: input.snapshot, errors };
+      // Trả về đúng credential đã tạo được BM để post-create (invite, readback,
+      // sync) dùng tiếp credential đó thay vì token gốc đã fail.
+      return {
+        id,
+        name: input.name,
+        source: 'graph' as const,
+        snapshot: input.snapshot,
+        errors,
+        credential: { kind: 'graph', token, cookie: '' } as CreatedBusinessCredential,
+      };
     } catch (error) {
       errors.push(toStructuredMetaError(error, { source: 'graph', stage: 'graph_create' }));
     }
@@ -325,7 +341,20 @@ export async function createBusinessAccount(input: {
         const parsed = parseSessionBody(response.text);
         const id = findBusinessId(parsed) || response.text.match(/"id"\s*:\s*"(\d{10,30})"/)?.[1] || '';
         if (id) {
-          return { id, name: input.name, source: 'session' as const, snapshot: input.snapshot, errors };
+          // BM tạo bằng cookie session: post-create phải dùng credential B này,
+          // không quay lại token Graph A đã fail.
+          return {
+            id,
+            name: input.name,
+            source: 'session' as const,
+            snapshot: input.snapshot,
+            errors,
+            credential: {
+              kind: 'session',
+              token: session.tokens[0] || '',
+              cookie: input.cookie || '',
+            } as CreatedBusinessCredential,
+          };
         }
         lastMessage = graphqlErrorMessage(parsed, response.text);
       }

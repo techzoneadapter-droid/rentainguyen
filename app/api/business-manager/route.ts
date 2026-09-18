@@ -7,6 +7,7 @@ import { applyBmProfile, createBusinessAccount, prepareCookieSession, readBmProf
 import type { Asset } from '../../../lib/data';
 import { MetaCreationError, toStructuredMetaError, type StructuredMetaError } from '../../../lib/meta-errors';
 import { canonicalOpenUrl, runIndependentBatch } from '../../../lib/resource-model';
+import { redactSecrets } from '../../../lib/redact';
 import { pushBmToShop } from '../../../lib/shop-online';
 import { getSessionCookieByUid, uidFromLabel } from '../../../lib/credential-vault';
 import { audit, config, list, owner, put } from '../../../lib/server';
@@ -160,7 +161,7 @@ export async function GET(req: Request) {
       token: publicToken(record),
     });
   } catch (error) {
-    return Response.json({ error: (error as Error).message }, { status: 400 });
+    return Response.json({ error: redactSecrets((error as Error).message) }, { status: 400 });
   }
 }
 
@@ -191,6 +192,11 @@ export async function POST(req: Request) {
       });
       diagnostics.push(...created.errors);
       const now = new Date().toISOString();
+      // Credential continuity: post-create (invite/readback/sync) phải dùng đúng
+      // credential đã tạo được BM. Nếu token gốc A fail và BM được tạo bởi
+      // session B thì tuyệt đối không quay lại A. Credential chỉ tồn tại server-side.
+      const postCreate = created.credential;
+      const postCreateToken = postCreate.token;
       let asset: Asset = {
         id: `${workspaceOwner}:meta:${created.id}`,
         metaId: created.id,
@@ -233,20 +239,29 @@ export async function POST(req: Request) {
       const invite: { requested: boolean; email?: string; status: 'pending' | 'not_requested' | 'failed'; error?: string } = input.adminEmail
         ? { requested: true, email: input.adminEmail, status: 'pending' }
         : { requested: false, status: 'not_requested' };
-      if (input.adminEmail) {
+      if (input.adminEmail && !postCreateToken) {
+        invite.status = 'failed';
+        invite.error = 'BM được tạo bằng cookie session không nhúng token Graph nên chưa mời admin được. Mời trong Business Settings hoặc đồng bộ lại rồi mời.';
+        asset.adminInviteStatus = 'failed';
+        asset.adminInviteError = invite.error;
+      } else if (input.adminEmail) {
         try {
-          await graphPostWithToken(context.source.token, `${created.id}/business_users`, { email: input.adminEmail, role: 'ADMIN' });
+          await graphPostWithToken(postCreateToken, `${created.id}/business_users`, { email: input.adminEmail, role: 'ADMIN' });
         } catch (error) {
           invite.status = 'failed';
-          invite.error = (error as Error).message;
+          invite.error = redactSecrets((error as Error).message);
           asset.adminInviteStatus = 'failed';
           asset.adminInviteError = invite.error;
         }
       }
 
-      if (input.autoCheckProfile || input.autoSync) {
+      if ((input.autoCheckProfile || input.autoSync) && !postCreateToken) {
+        diagnostics.push(toStructuredMetaError(new Error('Không đọc lại profile: BM tạo bằng session mà session không nhúng token Graph. Chạy Đồng bộ token để recovery bằng Account Snapshot.'), { source: 'session', stage: 'readback' }));
+        asset.checkStatus = 'failed';
+        asset.syncStatus = 'failed';
+      } else if (input.autoCheckProfile || input.autoSync) {
         try {
-          asset = applyBmProfile(asset, await readBmProfile(context.source.token, created.id));
+          asset = applyBmProfile(asset, await readBmProfile(postCreateToken, created.id));
           asset.checkStatus = 'ready';
           asset.syncStatus = 'ready';
         } catch (error) {
@@ -266,7 +281,7 @@ export async function POST(req: Request) {
           asset.shopStatus = 'ready';
         } catch (error) {
           asset.accessLinkStatus = 'failed';
-          asset.accessLinkError = (error as Error).message;
+          asset.accessLinkError = redactSecrets((error as Error).message);
           asset.shopStatus = 'not_ready';
         }
       }
@@ -281,16 +296,32 @@ export async function POST(req: Request) {
           asset.shopError = '';
         } catch (error) {
           asset.shopStatus = 'failed';
-          asset.shopError = (error as Error).message;
+          asset.shopError = redactSecrets((error as Error).message);
         }
       }
 
+      // saved=true CHỈ khi persist thành công. Meta tạo OK mà DB lỗi là
+      // PARTIAL_SUCCESS: báo đúng thực tế, không retry create (tránh tạo duplicate).
+      let persisted = true;
+      let persistError = '';
       try {
         await put(workspaceOwner, 'asset', asset).run();
       } catch (error) {
+        persisted = false;
+        persistError = redactSecrets((error as Error).message);
         diagnostics.push(toStructuredMetaError(error, { source: 'app', stage: 'persist' }));
       }
-      return { id: created.id, name: created.name, source: created.source, asset, diagnostics, invite };
+      return {
+        id: created.id,
+        name: created.name,
+        source: created.source,
+        asset,
+        diagnostics,
+        invite,
+        persisted,
+        persistError,
+        credentialKind: postCreate.kind,
+      };
     }, {
       continueOnError: input.continueOnError,
       maxConsecutiveErrors: input.maxConsecutiveErrors,
@@ -327,12 +358,16 @@ export async function POST(req: Request) {
     await audit(workspaceOwner, `Tạo BM ${input.mode}: ${successes.length} thành công, ${failures.length} thất bại${limitReached ? ' (chạm giới hạn Meta)' : ''} · token ${currentRecord.label}`).run();
 
     const first = successes[0]?.ok ? successes[0].value : undefined;
+    const partialPersisted = successes
+      .map((result) => result.ok ? result.value : null)
+      .filter((value): value is NonNullable<typeof value> => value !== null && !value.persisted);
     return Response.json({
       ok: failures.length === 0,
       limitReached,
       id: first?.id,
       name: first?.name,
-      saved: Boolean(first),
+      saved: Boolean(first?.persisted),
+      partialPersisted: partialPersisted.map((item) => ({ id: item.id, name: item.name, persistError: item.persistError })),
       business: first ? {
         id: first.id,
         name: first.name,
@@ -352,11 +387,11 @@ export async function POST(req: Request) {
       tokenStatus: currentRecord.status,
       message: limitReached
         ? `Tạo được ${successes.length} BM rồi chạm giới hạn tạo Business của tài khoản này. Batch đã dừng đúng lúc, không retry thêm.`
-        : `Đã xử lý ${batch.length} BM: ${successes.length} thành công, ${failures.length} thất bại.`,
+        : `Đã xử lý ${batch.length} BM: ${successes.length} thành công, ${failures.length} thất bại.${partialPersisted.length ? ` ${partialPersisted.length} BM đã tạo trên Meta nhưng chưa lưu vào workspace (PARTIAL_SUCCESS) — đừng tạo lại, chạy Đồng bộ token để recovery Business ID.` : ''}`,
     }, { status: successes.length ? 200 : 400 });
   } catch (error) {
     if (error instanceof z.ZodError) return Response.json({ error: 'Cấu hình tạo BM không hợp lệ.' }, { status: 400 });
-    if (error instanceof MetaCreationError) return Response.json({ error: error.message, errors: error.errors }, { status: 400 });
-    return Response.json({ error: (error as Error).message }, { status: 400 });
+    if (error instanceof MetaCreationError) return Response.json({ error: redactSecrets(error.message), errors: error.errors.map((item) => ({ ...item, message: redactSecrets(item.message) })) }, { status: 400 });
+    return Response.json({ error: redactSecrets((error as Error).message) }, { status: 400 });
   }
 }

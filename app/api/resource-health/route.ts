@@ -1,10 +1,17 @@
 import { z } from 'zod';
 import { applyBmProfile, readBmProfile } from '../../../lib/bm-profile';
+import {
+  classifyAdDelivery,
+  type AdAccessStatus,
+  type AdDeliveryClassification,
+} from '../../../lib/ad-status';
 import { getSessionCookieByUid } from '../../../lib/credential-vault';
 import type { Asset } from '../../../lib/data';
 import { inspectAdAccountSession, type SessionAdAccount } from '../../../lib/meta-session';
 import { audit, db, list, owner, put } from '../../../lib/server';
 import { mapPool } from '../../../lib/resource-model';
+import { redactSecrets } from '../../../lib/redact';
+import { AD_ACCOUNT_FIELD_VARIANTS, readWithFieldFallback } from '../../../lib/graph-field-fallback';
 import {
   classifyMetaTokenError,
   getMetaTokenSecret,
@@ -47,23 +54,24 @@ function objectValue(value: unknown): MetaObject {
 }
 
 async function graphWithFieldFallback(token: string, path: string, variants: string[]) {
-  let lastError: unknown;
-  for (const fields of variants) {
-    try {
-      return await graphWithToken(token, path, { fields });
-    } catch (error) {
-      lastError = error;
+  return readWithFieldFallback(variants,
+    (fields) => graphWithToken(token, path, { fields }),
+    (error) => {
       const classified = classifyMetaTokenError(error);
-      if (![100, 200].includes(classified.code || -1) && !isGraphCompatibilityError(error)) throw error;
-    }
-  }
-  throw lastError;
+      return [100, 200].includes(classified.code ?? -1) || isGraphCompatibilityError(error);
+    });
 }
 
 function optionalBoolean(value: unknown) {
   if (value === true || value === 'true' || value === 1 || value === '1') return true;
   if (value === false || value === 'false' || value === 0 || value === '0') return false;
   return undefined;
+}
+
+function optionalNumber(value: unknown) {
+  if (value === undefined || value === null || value === '') return undefined;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : undefined;
 }
 
 function metaIdOf(asset: Asset) {
@@ -79,26 +87,62 @@ function graphPath(asset: Asset, metaId: string) {
   return metaId;
 }
 
-function accountHealth(status: number): { health: HealthState; appStatus: string; note: string } {
-  if (status === 1) return { health: 'LIVE', appStatus: 'LIVE', note: 'Tài khoản quảng cáo đang ACTIVE theo Meta.' };
-  if ([2, 101].includes(status)) return { health: 'DIE', appStatus: 'DIE', note: `Meta account_status=${status}.` };
-  return { health: 'RESTRICTED', appStatus: 'Hạn chế', note: `Meta account_status=${status || 'unknown'}; cần kiểm tra trong Ads Manager.` };
+/**
+ * Health state cho UI từ delivery classification. Code chưa map / missing
+ * => UNKNOWN (giữ raw), KHÔNG suy đoán thành RESTRICTED hay DIE.
+ */
+function accountHealth(statusValue: unknown): {
+  health: HealthState;
+  appStatus: string;
+  note: string;
+  delivery: AdDeliveryClassification;
+} {
+  const delivery = classifyAdDelivery(statusValue);
+  const raw = delivery.rawAccountStatus;
+  switch (delivery.deliveryStatus) {
+    case 'LIVE':
+      return { health: 'LIVE', appStatus: 'LIVE', note: 'Tài khoản quảng cáo đang ACTIVE theo Meta.', delivery };
+    case 'DISABLED':
+      return { health: 'DIE', appStatus: 'DIE', note: `Meta account_status=${raw}.`, delivery };
+    case 'UNSETTLED':
+      return { health: 'DIE', appStatus: 'Chưa thanh toán', note: `Meta account_status=${raw} (UNSETTLED).`, delivery };
+    case 'CLOSED':
+      return { health: 'DIE', appStatus: 'Đã đóng', note: `Meta account_status=${raw} (CLOSED).`, delivery };
+    case 'PENDING':
+      return { health: 'RESTRICTED', appStatus: 'Chờ xử lý', note: `Meta account_status=${raw} (PENDING).`, delivery };
+    case 'RESTRICTED':
+      return { health: 'RESTRICTED', appStatus: 'Hạn chế', note: `Meta account_status=${raw}; cần kiểm tra trong Ads Manager.`, delivery };
+    default:
+      return {
+        health: 'UNKNOWN',
+        appStatus: 'Chưa xác định',
+        note: `Meta trả account_status=${raw === undefined ? 'trống' : raw} chưa map. Giữ nguyên raw, không suy đoán thành DIE/hạn chế.`,
+        delivery,
+      };
+  }
 }
 
 function applySessionAdAccount(asset: Asset, account: SessionAdAccount, now: string, graphError: string) {
-  const statusKnown = account.accountStatus !== undefined && account.accountStatus !== null;
-  const state = statusKnown ? accountHealth(Number(account.accountStatus)) : null;
+  const delivery = classifyAdDelivery(account.accountStatus);
+  const statusKnown = delivery.deliveryStatus !== 'UNKNOWN' && delivery.rawAccountStatus !== undefined;
+  const state = statusKnown ? accountHealth(delivery.rawAccountStatus) : null;
   const currency = account.currency || asset.currency || '';
   const spendCap = account.spendCap || asset.spendCap;
-  const message = statusKnown
-    ? `${state?.note || ''} Chi tiết được đọc qua session.`
-    : `Đã đọc chi tiết tài khoản qua session; Meta chưa trả account_status. Graph: ${graphError}`;
+  // Session mở đúng TKQC này => ACCESSIBLE. Không có account_status => delivery UNKNOWN,
+  // KHÔNG "Chưa đọc được" một mình và không bị coi là mất quyền.
+  const message = state
+    ? `${state.note} Chi tiết được đọc qua session.`
+    : `Session xác nhận truy cập được TKQC này; trạng thái quảng cáo chưa xác định. Graph: ${redactSecrets(graphError)}`;
   const next: Asset = {
     ...asset,
     name: account.name || asset.name,
-    status: state?.appStatus || 'Chưa đọc được trạng thái',
-    metaStatus: account.accountStatus,
-    accountStatus: account.accountStatus,
+    status: state?.appStatus || 'Truy cập được',
+    metaStatus: delivery.rawAccountStatus,
+    accountStatus: delivery.rawAccountStatus,
+    rawAccountStatus: delivery.rawAccountStatus ?? asset.rawAccountStatus,
+    accessStatus: 'ACCESSIBLE' as AdAccessStatus,
+    deliveryStatus: state?.delivery.deliveryStatus || delivery.deliveryStatus,
+    readSource: 'SESSION',
     disableReason: account.disableReason ?? asset.disableReason,
     currency,
     amountSpent: account.amountSpent || asset.amountSpent,
@@ -121,6 +165,7 @@ function applySessionAdAccount(asset: Asset, account: SessionAdAccount, now: str
     creationTime: account.createdTime || asset.creationTime,
     limit: spendCap && spendCap !== '0' ? `${spendCap} ${currency} (đơn vị API)` : asset.limit,
     checked: now,
+    statusCheckedAt: now,
     healthNote: message,
   };
   return { next, health: state?.health || 'UNKNOWN' as HealthState, message };
@@ -236,11 +281,7 @@ export async function POST(req: Request) {
         const fieldVariants = asset.type === 'BM'
           ? ['id,name,verification_status,created_time,updated_time,timezone_id,primary_page,vertical,two_factor_type', 'id,name,verification_status,created_time,timezone_id,primary_page']
           : asset.type === 'TKQC'
-            ? [
-                'id,account_id,name,account_status,disable_reason,currency,spend_cap,amount_spent,balance,min_daily_budget,timezone_id,timezone_name,timezone_offset_hours_utc,is_prepay_account,funding_source,funding_source_details,business,owner,created_time',
-                'id,name,account_status,disable_reason,currency,spend_cap,amount_spent,balance,timezone_id,timezone_name,is_prepay_account,business',
-                'id,name,account_status,currency,spend_cap,amount_spent,balance',
-              ]
+            ? AD_ACCOUNT_FIELD_VARIANTS
             : asset.type === 'Page'
               ? ['id,name,category,verification_status,followers_count,fan_count,link', 'id,name,category,verification_status,link', 'id,name']
               : ['id,name,creation_time,last_fired_time', 'id,name'];
@@ -250,14 +291,12 @@ export async function POST(req: Request) {
         let message = 'Meta trả về tài nguyên và token vẫn có quyền truy cập.';
 
         if (asset.type === 'TKQC') {
-          const rawAccountStatus = text(meta.account_status);
-          const parsedAccountStatus = Number(rawAccountStatus);
-          const accountStatus = rawAccountStatus && Number.isFinite(parsedAccountStatus) ? parsedAccountStatus : undefined;
-          const state = accountStatus === undefined
-            ? { health: 'UNKNOWN' as HealthState, appStatus: 'Chưa đọc được trạng thái', note: 'Meta trả tài khoản nhưng không trả account_status.' }
-            : accountHealth(accountStatus);
+          const state = accountHealth(meta.account_status);
+          const accountStatus = state.delivery.rawAccountStatus;
           health = state.health;
-          message = state.note;
+          message = state.delivery.deliveryStatus === 'UNKNOWN'
+            ? 'Meta trả tài khoản nhưng account_status chưa xác định; TKQC vẫn ACCESSIBLE qua Graph.'
+            : state.note;
           const currency = text(meta.currency) || asset.currency || '';
           const spendCap = text(meta.spend_cap);
           const funding = objectValue(meta.funding_source_details);
@@ -274,7 +313,11 @@ export async function POST(req: Request) {
             status: state.appStatus,
             metaStatus: accountStatus,
             accountStatus,
-            disableReason: Number(meta.disable_reason || 0) || asset.disableReason,
+            rawAccountStatus: accountStatus,
+            accessStatus: 'ACCESSIBLE' as AdAccessStatus,
+            deliveryStatus: state.delivery.deliveryStatus,
+            readSource: 'GRAPH',
+            disableReason: optionalNumber(meta.disable_reason) ?? asset.disableReason,
             currency,
             spendCap: spendCap || asset.spendCap,
             amountSpent: text(meta.amount_spent) || asset.amountSpent,
@@ -288,7 +331,7 @@ export async function POST(req: Request) {
             fundingDisplay: text(funding.display_string) || asset.fundingDisplay,
             timezoneId: text(meta.timezone_id) || asset.timezoneId,
             timezoneName: text(meta.timezone_name) || asset.timezoneName,
-            timezoneOffsetHoursUtc: Number(meta.timezone_offset_hours_utc) || asset.timezoneOffsetHoursUtc,
+            timezoneOffsetHoursUtc: optionalNumber(meta.timezone_offset_hours_utc) ?? asset.timezoneOffsetHoursUtc,
             ownerId,
             ownership: ownerId && parentBusinessId
               ? ownerId === parentBusinessId ? 'owned' : 'client'
@@ -297,6 +340,7 @@ export async function POST(req: Request) {
             creationTime: text(meta.created_time) || asset.creationTime,
             limit: spendCap && spendCap !== '0' ? `${spendCap} ${currency} (đơn vị API)` : asset.limit,
             checked: now,
+            statusCheckedAt: now,
             healthNote: message,
           };
         } else if (asset.type === 'BM') {
@@ -317,7 +361,7 @@ export async function POST(req: Request) {
             healthNote: message,
           }, {});
           try { next = applyBmProfile(next, await readBmProfile(resolved.token, metaId)); } catch { /* keep counts already stored */ }
-          next = { ...next, checked: now, healthNote: message, status: 'Truy cập được' };
+          next = { ...next, checked: now, statusCheckedAt: now, healthNote: message, status: 'Truy cập được' };
         } else {
           next = {
             ...asset,
@@ -335,6 +379,7 @@ export async function POST(req: Request) {
             }),
             status: 'Truy cập được',
             checked: now,
+            statusCheckedAt: now,
             healthNote: message,
           };
         }
@@ -342,8 +387,12 @@ export async function POST(req: Request) {
         updates.push(next);
         results.push({ id: asset.id, metaId, name: next.name, type: asset.type, health, tokenLabel: resolved.record.label, message });
         events.push({ id: crypto.randomUUID(), assetId: asset.id, metaId, type: asset.type, health, tokenId: resolved.record.id, tokenLabel: resolved.record.label, checked: now, metaStatus: next.metaStatus });
+        // Ghi token là read-modify-write: bên trong lock phải lấy record MỚI NHẤT
+        // từ cache (asset cùng token chạy song song có thể vừa ghi) rồi mới merge patch,
+        // tránh clobber lastError/status của worker khác.
         await withTokenLock(resolved.record.id, async () => {
-          const updatedRecord = await updateMetaToken(workspaceOwner, resolved.record, {
+          const latest = tokenCache.get(resolved.record.id)?.record || resolved.record;
+          const updatedRecord = await updateMetaToken(workspaceOwner, latest, {
             status: 'active',
             lastCheckedAt: now,
             lastError: undefined,
@@ -391,22 +440,32 @@ export async function POST(req: Request) {
         }
         const appStatus = classified.status === 'permission_issue' ? 'Cần kiểm tra quyền' : 'Không xác định';
         const health: HealthState = classified.status === 'permission_issue' ? 'RESTRICTED' : 'UNKNOWN';
-        const message = classified.reason;
-        updates.push({ ...asset, status: appStatus, checked: now, healthNote: message });
+        // Lỗi đọc một tài nguyên KHÔNG đủ bằng chứng kết luận mất quyền vĩnh viễn:
+        // accessStatus = UNKNOWN, giữ nguyên deliveryStatus cũ (last known), không đụng token DIE.
+        const message = redactSecrets(classified.reason);
+        updates.push({
+          ...asset,
+          status: appStatus,
+          accessStatus: 'UNKNOWN' as AdAccessStatus,
+          checked: now,
+          statusCheckedAt: now,
+          healthNote: message,
+        });
         results.push({ id: asset.id, metaId, name: asset.name, type: asset.type, health, tokenLabel: resolved.record.label, message });
         events.push({ id: crypto.randomUUID(), assetId: asset.id, metaId, type: asset.type, health, tokenId: resolved.record.id, tokenLabel: resolved.record.label, error: message, errorCode: classified.code, errorSubcode: classified.subcode, checked: now });
 
         await withTokenLock(resolved.record.id, async () => {
-          const updatedRecord = await updateMetaToken(workspaceOwner, resolved.record, {
+          const latest = tokenCache.get(resolved.record.id)?.record || resolved.record;
+          const updatedRecord = await updateMetaToken(workspaceOwner, latest, {
             status: classified.status,
             lastCheckedAt: now,
-            lastError: classified.reason,
+            lastError: message,
             lastErrorCode: classified.code,
             lastErrorSubcode: classified.subcode,
           });
           tokenCache.set(updatedRecord.id, { record: updatedRecord, token: resolved.token });
           if (classified.status === 'invalid' || classified.status === 'rate_limited') {
-            haltedTokens.set(updatedRecord.id, classified.reason);
+            haltedTokens.set(updatedRecord.id, message);
           }
         });
       }
@@ -438,6 +497,6 @@ export async function POST(req: Request) {
     if (error instanceof z.ZodError) {
       return Response.json({ error: 'Chọn từ 1 đến 100 tài nguyên hợp lệ.' }, { status: 400 });
     }
-    return Response.json({ error: (error as Error).message }, { status: 400 });
+    return Response.json({ error: redactSecrets((error as Error).message) }, { status: 400 });
   }
 }

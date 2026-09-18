@@ -100,9 +100,9 @@ export async function graph(path: string, params: Record<string, string> = {}) {
 
   const url = new URL(`https://graph.facebook.com/${connection.version}/${path}`);
   for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
-  url.searchParams.set('access_token', connection.token);
-
+  // Token đi qua header Authorization, không đặt vào URL query.
   const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${connection.token}` },
     signal: AbortSignal.timeout(25000),
   });
   const body = (await response.json()) as GraphBody;

@@ -77,6 +77,17 @@ export type Asset = {
  creationStatus?:'created'|'failed';
  checkStatus?:'pending'|'ready'|'failed';
  syncStatus?:'pending'|'ready'|'failed';
+ // Model trạng thái TKQC tách ba lớp (xem lib/ad-status.ts). Optional để tương thích
+ // với asset cũ trong D1 — payload không có các field này vẫn đọc được.
+ accessStatus?:'ACCESSIBLE'|'ACCESS_LOST'|'UNKNOWN';
+ deliveryStatus?:'LIVE'|'DISABLED'|'RESTRICTED'|'PENDING'|'UNSETTLED'|'CLOSED'|'UNKNOWN';
+ readSource?:'GRAPH'|'SESSION'|'BM_EDGE'|'MIXED'|'UNKNOWN';
+ rawAccountStatus?:number;
+ checkWarnings?:string[];
+ // Freshness tách theo loại dữ liệu thay vì một mốc `checked` duy nhất.
+ authCheckedAt?:string;
+ resourceScannedAt?:string;
+ statusCheckedAt?:string;
 };
 export type Entry = { id:string; name:string; status:string; created:string; [key:string]:unknown };
 export const types = ['BM', 'TKQC', 'Page', 'Dataset/Pixel'];

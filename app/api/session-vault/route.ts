@@ -10,6 +10,7 @@ import {
   type MetaSessionRecord,
 } from '../../../lib/credential-vault';
 import { mapPool } from '../../../lib/resource-model';
+import { redactSecrets } from '../../../lib/redact';
 import { audit, list, owner, put } from '../../../lib/server';
 
 type PublicMetaSession = Omit<MetaSessionRecord, 'encrypted'>;
@@ -51,7 +52,7 @@ export async function GET() {
     const sessions = await getSessions(workspaceOwner);
     return Response.json({ sessions: sessions.map(publicSession) });
   } catch (error) {
-    return Response.json({ error: (error as Error).message }, { status: 400 });
+    return Response.json({ error: redactSecrets((error as Error).message) }, { status: 400 });
   }
 }
 
@@ -95,7 +96,7 @@ export async function POST(req: Request) {
             ...record,
             status: 'invalid',
             lastCheckedAt: now,
-            lastError: (error as Error).message,
+            lastError: redactSecrets((error as Error).message),
             updated: now,
           };
           await put(workspaceOwner, 'meta-session', next).run();
@@ -172,6 +173,6 @@ export async function POST(req: Request) {
     if (error instanceof z.ZodError) {
       return Response.json({ error: 'Dữ liệu cookie không hợp lệ. Mỗi lượt tối đa 50 session.' }, { status: 400 });
     }
-    return Response.json({ error: (error as Error).message }, { status: 400 });
+    return Response.json({ error: redactSecrets((error as Error).message) }, { status: 400 });
   }
 }

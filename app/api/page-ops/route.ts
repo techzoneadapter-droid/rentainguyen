@@ -84,9 +84,10 @@ async function listPosts(token: string, pageId: string) {
 
 async function deleteObject(token: string, objectId: string) {
   const url = new URL(`https://graph.facebook.com/${config().version}/${objectId}`);
-  url.searchParams.set('access_token', token);
+  // Token chỉ đi qua header Authorization, không đặt vào URL để tránh bị log.
   const response = await fetch(url, {
     method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}` },
     signal: AbortSignal.timeout(25000),
   });
   const body = await response.json() as MetaObject;
